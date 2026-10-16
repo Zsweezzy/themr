@@ -122,7 +122,9 @@ files = ["~/.config/rofi/config.rasi", "~/.local/share/rofi/themes/tokyonight-mo
 
 themr knows the usual config location and reload command for these apps. A preset is only
 added when its file exists, so the ones you do not run cost nothing. Paths with several
-entries list every one that exists.
+entries list every one that exists. Every reload command is gated on the app actually
+running, so an app that is not running is a silent no-op (and a daemon client that would
+otherwise wait forever for its daemon can never hang an Apply).
 
 | App | Config file(s) | Reload |
 | --- | --- | --- |
