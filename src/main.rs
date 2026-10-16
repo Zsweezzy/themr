@@ -35,24 +35,19 @@ fn main() {
         .application_id("dev.themr.Themr")
         .build();
     app.connect_activate(|app| {
-        // GTK's built-in theme pins `button.color > colorswatch:only-child` to
-        // border-radius: 0 and the active theme never re-rounds it, so every
-        // color swatch renders square next to rounded buttons.
+        // The color swatch is natively a wide pill (40x24), so no border-radius
+        // can make it a circle. Pin the swatch square (40px matches its natural
+        // width) and round it fully. Priority must beat the user's
+        // ~/.config/gtk-4.0/gtk.css, which GTK loads at USER priority.
         let css = gtk::CssProvider::new();
         css.load_from_data(
             "button.color > colorswatch:only-child,\n\
              button.color > colorswatch:only-child > overlay {\n\
+                 min-width: 40px;\n\
+                 min-height: 40px;\n\
                  border-radius: 50%;\n\
-                 box-shadow: none;\n\
              }",
         );
-        if let Some(display) = gdk::Display::default() {
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &css,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
 
         let win = gtk::ApplicationWindow::builder()
             .application(app)
@@ -60,6 +55,11 @@ fn main() {
             .default_width(780)
             .default_height(700)
             .build();
+        gtk::style_context_add_provider_for_display(
+            &gtk::prelude::WidgetExt::display(&win),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_USER + 1,
+        );
 
         let header = gtk::HeaderBar::new();
         let import_btn = gtk::Button::with_label("Import JSON…");
