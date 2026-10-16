@@ -44,36 +44,211 @@ pub fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.{BACKUP_EXT}", path.display()))
 }
 
-fn is_hex(c: char) -> bool {
-    c.is_ascii_hexdigit()
+/// A colour literal in the text, with enough info to rewrite just the channel
+/// digits and leave the syntax, separators and alpha untouched.
+struct ColorLit {
+    start: usize,
+    end: usize,
+    /// normalised "#rrggbb", lowercased
+    rgb: String,
+    /// absolute byte ranges of the channel digits: one for hex syntaxes, three
+    /// for CSS `rgb()`/`rgba()`.
+    digits: Vec<(usize, usize)>,
+    decimal: bool,
+    upper: bool,
 }
 
-/// Replace whole hex tokens only: `#ff0000` must not match inside `#ff0000ff`.
-fn replace_hex(text: &str, old: &str, new: &str) -> (String, usize) {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    let mut n = 0;
-    while let Some(i) = rest.find(old) {
-        let before_ok = rest[..i]
-            .chars()
-            .next_back()
-            .map(|c| !is_hex(c))
-            .unwrap_or(true);
-        let after_ok = rest[i + old.len()..]
-            .chars()
-            .next()
-            .map(|c| !is_hex(c))
-            .unwrap_or(true);
-        if before_ok && after_ok {
-            out.push_str(&rest[..i]);
-            out.push_str(new);
-            n += 1;
-        } else {
-            out.push_str(&rest[..i + old.len()]);
-        }
-        rest = &rest[i + old.len()..];
+fn take_hex(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() && b[i].is_ascii_hexdigit() {
+        i += 1;
     }
-    out.push_str(rest);
+    i
+}
+
+fn expand3(h: &str) -> String {
+    h.chars().flat_map(|c| [c, c]).collect()
+}
+
+/// `#rgb` / `#rrggbb`. The 8-digit `#rrggbbaa` is a distinct colour and is
+/// deliberately not recognised, so a binding to `#rrggbb` never touches it.
+fn hash_lit(text: &str, i: usize) -> Option<ColorLit> {
+    let b = text.as_bytes();
+    let j = i + 1;
+    let end = take_hex(b, j);
+    let (rgb, upper) = match end - j {
+        3 => (format!("#{}", expand3(&text[j..end])), false),
+        6 => (
+            format!("#{}", text[j..end].to_ascii_lowercase()),
+            text[j..end].bytes().any(|c| c.is_ascii_uppercase()),
+        ),
+        _ => return None,
+    };
+    Some(ColorLit {
+        start: i,
+        end,
+        rgb,
+        digits: vec![(j, end)],
+        decimal: false,
+        upper,
+    })
+}
+
+/// hypr: `0xRRGGBB` and `0xAARRGGBB`.
+fn hex_lit(text: &str, i: usize) -> Option<ColorLit> {
+    let b = text.as_bytes();
+    let j = i + 2;
+    let end = take_hex(b, j);
+    let (rgb, rs) = match end - j {
+        6 => (format!("#{}", text[j..end].to_ascii_lowercase()), j),
+        8 => (format!("#{}", text[j + 2..end].to_ascii_lowercase()), j + 2),
+        _ => return None,
+    };
+    Some(ColorLit {
+        start: i,
+        end,
+        rgb,
+        digits: vec![(rs, end)],
+        decimal: false,
+        upper: text[rs..end].bytes().any(|c| c.is_ascii_uppercase()),
+    })
+}
+
+/// `rgb(rrggbb)` / `rgba(rrggbbaa)` (hypr) and `rgb(r, g, b)` / `rgba(r, g, b, a)` (CSS).
+fn css_lit(text: &str, i: usize) -> Option<ColorLit> {
+    let b = text.as_bytes();
+    let mut k = i + 3;
+    if k < b.len() && b[k] == b'a' {
+        k += 1;
+    }
+    if k >= b.len() || b[k] != b'(' {
+        return None;
+    }
+    let open = k + 1;
+    let close = open + text[open..].find(')')?;
+    let content = &text[open..close];
+    let stripped: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    if !stripped.contains(',')
+        && matches!(stripped.len(), 6 | 8)
+        && stripped.bytes().all(|c| c.is_ascii_hexdigit())
+    {
+        let alpha_form = stripped.len() == 8;
+        let rgb = if alpha_form {
+            format!("#{}", stripped[..6].to_ascii_lowercase())
+        } else {
+            format!("#{}", stripped.to_ascii_lowercase())
+        };
+        let re = if alpha_form { open + 6 } else { close };
+        return Some(ColorLit {
+            start: i,
+            end: close + 1,
+            rgb,
+            digits: vec![(open, re)],
+            decimal: false,
+            upper: stripped.bytes().any(|c| c.is_ascii_uppercase()),
+        });
+    }
+    let mut comps: Vec<(usize, usize, u8)> = Vec::new();
+    let mut off = 0;
+    for part in content.split(',') {
+        let lead = part.len() - part.trim_start().len();
+        let tok = part.trim_start();
+        let n = tok.bytes().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 {
+            return None;
+        }
+        let val: u8 = tok[..n].parse().ok()?;
+        comps.push((open + off + lead, open + off + lead + n, val));
+        off += part.len() + 1;
+    }
+    if comps.len() < 3 {
+        return None;
+    }
+    Some(ColorLit {
+        start: i,
+        end: close + 1,
+        rgb: format!("#{:02x}{:02x}{:02x}", comps[0].2, comps[1].2, comps[2].2),
+        digits: vec![
+            (comps[0].0, comps[0].1),
+            (comps[1].0, comps[1].1),
+            (comps[2].0, comps[2].1),
+        ],
+        decimal: true,
+        upper: false,
+    })
+}
+
+/// Every colour literal in `text`, in order.
+fn scan_lits(text: &str) -> Vec<ColorLit> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let found = if c == b'#' {
+            hash_lit(text, i)
+        } else if c == b'0' && i + 1 < b.len() && (b[i + 1] | 0x20) == b'x' {
+            hex_lit(text, i)
+        } else if c == b'r' && text[i..].starts_with("rgb") {
+            css_lit(text, i)
+        } else {
+            None
+        };
+        match found {
+            Some(l) => {
+                i = l.end;
+                out.push(l);
+            }
+            None => {
+                i += if c < 0x80 {
+                    1
+                } else {
+                    text[i..].chars().next().unwrap().len_utf8()
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Rewrite `lit`'s channels to `new_rgb` ("#rrggbb"), keeping its syntax and alpha.
+fn rebuild(text: &str, lit: &ColorLit, new_rgb: &str) -> String {
+    let hex = &new_rgb[1..];
+    let comps = [
+        u8::from_str_radix(&hex[0..2], 16).unwrap(),
+        u8::from_str_radix(&hex[2..4], 16).unwrap(),
+        u8::from_str_radix(&hex[4..6], 16).unwrap(),
+    ];
+    let mut s = String::new();
+    let mut cur = lit.start;
+    for (idx, (ds, de)) in lit.digits.iter().enumerate() {
+        s.push_str(&text[cur..*ds]);
+        if lit.decimal {
+            s.push_str(&comps[idx].to_string());
+        } else {
+            s.push_str(&if lit.upper {
+                hex.to_ascii_uppercase()
+            } else {
+                hex.to_string()
+            });
+        }
+        cur = *de;
+    }
+    s.push_str(&text[cur..lit.end]);
+    s
+}
+
+/// Replace every literal whose RGB is `old` with `new`. Two literals of the
+/// same colour both change, whatever syntax each uses.
+fn replace_color(text: &str, old: &str, new: &str) -> (String, usize) {
+    let mut out = text.to_string();
+    let mut n = 0;
+    for lit in scan_lits(text).iter().rev() {
+        if lit.rgb == old {
+            let rebuilt = rebuild(text, lit, new);
+            out.replace_range(lit.start..lit.end, &rebuilt);
+            n += 1;
+        }
+    }
     (out, n)
 }
 
@@ -124,26 +299,9 @@ pub struct RenderResult {
     pub warnings: Vec<String>,
 }
 
-/// Every whole `#rgb`/`#rrggbb`/`#rrggbbaa` literal in the text, lowercased.
-fn scan_hexes(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut found = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] != '#' {
-            i += 1;
-            continue;
-        }
-        let mut j = i + 1;
-        while j < chars.len() && is_hex(chars[j]) {
-            j += 1;
-        }
-        if matches!(j - i - 1, 3 | 6 | 8) {
-            found.push(chars[i..j].iter().collect::<String>().to_lowercase());
-        }
-        i = j;
-    }
-    found
+/// The RGB of every colour literal in the text, lowercased "#rrggbb".
+fn scan_colors(text: &str) -> Vec<String> {
+    scan_lits(text).into_iter().map(|l| l.rgb).collect()
 }
 
 /// Names that are only synonyms in the bundled themes. When a value has more
@@ -159,7 +317,7 @@ fn adopt_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
         by_value.entry(value.as_str()).or_default().push(token);
     }
     let mut adopted = BTreeMap::new();
-    for hex in scan_hexes(text) {
+    for hex in scan_colors(text) {
         let Some(tokens) = by_value.get(hex.as_str()) else {
             continue;
         };
@@ -172,6 +330,74 @@ fn adopt_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
         }
     }
     adopted
+}
+
+/// Config keys that name a palette token but are not spelled like one, so a
+/// keyed line still binds: btop's `theme[main_bg]`, rofi's `text-color`.
+const KEY_ALIASES: [(&str, &str); 48] = [
+    ("main_bg", "background"),
+    ("main_fg", "foreground"),
+    ("title", "foreground"),
+    ("hi_fg", "cyan"),
+    ("selected_bg", "surface"),
+    ("selected_fg", "foreground"),
+    ("inactive_fg", "muted"),
+    ("proc_misc", "cyan"),
+    ("cpu_box", "muted"),
+    ("mem_box", "muted"),
+    ("net_box", "muted"),
+    ("proc_box", "muted"),
+    ("div_line", "muted"),
+    ("temp_start", "cyan"),
+    ("temp_mid", "yellow"),
+    ("temp_end", "red"),
+    ("cpu_start", "blue"),
+    ("cpu_mid", "purple"),
+    ("cpu_end", "red"),
+    ("free_start", "cyan"),
+    ("free_mid", "blue"),
+    ("free_end", "foreground"),
+    ("cached_start", "cyan"),
+    ("cached_mid", "cyan"),
+    ("cached_end", "blue"),
+    ("available_start", "cyan"),
+    ("available_mid", "cyan"),
+    ("available_end", "blue"),
+    ("used_start", "green"),
+    ("used_mid", "yellow"),
+    ("used_end", "red"),
+    ("download_start", "blue"),
+    ("download_mid", "cyan"),
+    ("download_end", "cyan"),
+    ("upload_start", "magenta"),
+    ("upload_mid", "purple"),
+    ("upload_end", "blue"),
+    ("text-color", "foreground"),
+    ("background-color", "background"),
+    ("selected-background-color", "surface"),
+    ("selected-text-color", "foreground"),
+    ("active-background-color", "blue"),
+    ("active-text-color", "overlay"),
+    ("urgent-background-color", "red"),
+    ("urgent-text-color", "overlay"),
+    ("border-color", "surface"),
+    ("placeholder-color", "muted"),
+    ("handle-color", "surface"),
+];
+
+/// `main_bg` for `theme[main_bg]`, and any configured alias -> palette token.
+fn resolve_key<'a>(key: &'a str, theme: &'a Theme) -> Option<&'a str> {
+    let bare = key
+        .strip_prefix("theme[")
+        .and_then(|k| k.strip_suffix(']'))
+        .unwrap_or(key);
+    if theme.colors.contains_key(bare) {
+        return Some(bare);
+    }
+    KEY_ALIASES
+        .iter()
+        .find(|(alias, token)| *alias == bare && theme.colors.contains_key(*token))
+        .map(|(_, token)| *token)
 }
 
 /// A line that names a color by key (`background #222436`, `foreground = "#c8d3f5"`)
@@ -193,17 +419,12 @@ fn key_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
         let end = line
             .find(|c: char| c == '=' || c == ':' || c.is_whitespace())
             .unwrap_or(line.len());
-        let key = &line[..end];
-        if !theme.colors.contains_key(key) {
+        let Some(token) = resolve_key(&line[..end], theme) else {
             continue;
-        }
-        // only the palette's own format (#rgb/#rrggbb), so a value with alpha
-        // (`#000000ff`) is not mistaken for the token's color
-        if let Some(hex) = scan_hexes(&line[end..])
-            .into_iter()
-            .find(|h| h.len() <= 7)
-        {
-            out.entry(key.to_string()).or_insert(hex);
+        };
+        // the first colour on the line is the one it means, alpha or not
+        if let Some(lit) = scan_lits(&line[end..]).into_iter().next() {
+            out.entry(token.to_string()).or_insert(lit.rgb);
         }
     }
     out
@@ -244,16 +465,18 @@ pub fn render(text: &str, theme: &Theme, previous: &BTreeMap<String, String>) ->
     let previous = &tracked;
 
     // shortcut: same hex used for two tokens can only resolve to one new value; the first wins.
-    let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
-    for (token, old) in previous {
-        let Some(new) = theme.colors.get(token) else {
+    let mut claimed: BTreeMap<String, String> = BTreeMap::new();
+    for (token, old_raw) in previous {
+        let Some(new_raw) = theme.colors.get(token) else {
             warnings.push(format!(
                 "token '{token}' missing from this theme, left as is"
             ));
             continue;
         };
-        if let Some(other) = claimed.get(old.as_str())
-            && other != &token.as_str()
+        let old = old_raw.to_ascii_lowercase();
+        let new = new_raw.to_ascii_lowercase();
+        if let Some(other) = claimed.get(&old)
+            && other != token
         {
             warnings.push(format!(
                 "'{old}' is shared by '{other}' and '{token}', used '{other}'"
@@ -263,8 +486,8 @@ pub fn render(text: &str, theme: &Theme, previous: &BTreeMap<String, String>) ->
         if old == new {
             continue;
         }
-        claimed.insert(old, token);
-        let (next, hits) = replace_hex(&out, old, new);
+        claimed.insert(old.clone(), token.clone());
+        let (next, hits) = replace_color(&out, &old, &new);
         if hits == 0 {
             if !written.contains_key(token) {
                 warnings.push(format!(
@@ -534,5 +757,68 @@ mod tests {
         let r = render("bg #000000ff\n", &t, &BTreeMap::new());
         assert_eq!(r.text, "bg #000000ff\n");
         assert_eq!(r.replaced, 0);
+    }
+
+    #[test]
+    fn hypr_rgba_keeps_its_alpha() {
+        // active_border = rgba(RRGGBBaa)
+        let t = parse_theme(r##"{"colors":{"blue":"#81a1c1"}}"##, "k").unwrap();
+        let mut prev = BTreeMap::new();
+        prev.insert("blue".to_string(), "#82aaff".to_string());
+        let r = render(r#"active = rgba(82aaffee)"#, &t, &prev);
+        assert_eq!(r.text, "active = rgba(81a1c1ee)");
+        assert_eq!(r.replaced, 1);
+    }
+
+    #[test]
+    fn hypr_rgba_hex_is_adopted_by_value() {
+        let t = parse_theme(r##"{"colors":{"blue":"#82aaff"}}"##, "k").unwrap();
+        let r = render(r#"active = rgba(82aaffee)"#, &t, &BTreeMap::new());
+        assert_eq!(r.text, "active = rgba(82aaffee)");
+        assert_eq!(r.written["blue"], "#82aaff");
+    }
+
+    #[test]
+    fn hypr_0x_keeps_its_alpha() {
+        // color = 0xAARRGGBB
+        let t = parse_theme(r##"{"colors":{"overlay":"#434c5e"}}"##, "k").unwrap();
+        let mut prev = BTreeMap::new();
+        prev.insert("overlay".to_string(), "#16161e".to_string());
+        let r = render("color = 0xee16161e", &t, &prev);
+        assert_eq!(r.text, "color = 0xee434c5e");
+    }
+
+    #[test]
+    fn css_rgb_and_rgba_are_rewritten() {
+        let t = parse_theme(r##"{"colors":{"blue":"#81a1c1","background":"#2e3440"}}"##, "k").unwrap();
+        let mut prev = BTreeMap::new();
+        prev.insert("blue".to_string(), "#82aaff".to_string());
+        prev.insert("background".to_string(), "#1e2030".to_string());
+        let r = render(
+            "color: rgb(130, 170, 255);\nbackground-color: rgba(30, 32, 48, 0.9);",
+            &t,
+            &prev,
+        );
+        assert_eq!(
+            r.text,
+            "color: rgb(129, 161, 193);\nbackground-color: rgba(46, 52, 64, 0.9);"
+        );
+    }
+
+    #[test]
+    fn btop_theme_keys_bind_through_aliases() {
+        // theme[main_bg]="#222436" follows the `background` token
+        let t = parse_theme(r##"{"colors":{"background":"#1e2030"}}"##, "k").unwrap();
+        let r = render("theme[main_bg]=\"#222436\"\n", &t, &BTreeMap::new());
+        assert_eq!(r.text, "theme[main_bg]=\"#1e2030\"\n");
+        assert_eq!(r.replaced, 1);
+    }
+
+    #[test]
+    fn rofi_colors_bind_through_aliases() {
+        let t = parse_theme(r##"{"colors":{"foreground":"#eeeeee"}}"##, "k").unwrap();
+        let r = render("text-color: #ff0000;\n", &t, &BTreeMap::new());
+        assert_eq!(r.text, "text-color: #eeeeee;\n");
+        assert_eq!(r.replaced, 1);
     }
 }

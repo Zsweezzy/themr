@@ -24,7 +24,9 @@ one GUI.
    A line that names a color by a token (`background #222436`, `foreground = "#c8d3f5"`)
    is tracked under that name too, so it follows the token even when its value is not in
    the palette — this is what makes, say, kitty's `background` line respond to the
-   `background` token.
+   `background` token. Known config keys that mean a token bind the same way: btop's
+   `theme[main_bg]`, rofi's `text-color`/`background-color`, and the rest of their
+   palettes.
 2. **themr replaces markers with hex values** on Apply, and remembers what it wrote for each
    file in `~/.config/themr/state.json`.
 3. **Switch theme → Apply →** the hex values themr tracks are swapped for the new
@@ -100,6 +102,17 @@ theme = "catppuccin-mocha"      # optional per-app override
 files = ["~/.config/waybar/style.css"]
 ```
 
+An app whose config only *names* a theme (btop's `color_theme`, rofi's `@theme`) keeps its
+colours in a separate file — list that file too and themr recolors it in place:
+
+```toml
+[apps.btop]
+files = ["~/.config/btop/btop.conf", "~/.config/btop/themes/tokyo-night-moon.theme"]
+
+[apps.rofi]
+files = ["~/.config/rofi/config.rasi", "~/.local/share/rofi/themes/tokyonight-moon.rasi"]
+```
+
 ## Theme format
 
 `colors` maps token names to hex. A flat map also works, so most community palettes
@@ -138,8 +151,10 @@ never `white`.
   file whose palette is a *different* variant of the same theme (e.g. Tokyo Night Storm
   hexes against a Tokyo Night Moon theme) adopts only the few colors that coincide; the
   rest need `{{token}}` markers to join in.
-- Colors written as function calls rather than hex (QML `Qt.rgba(…)`, CSS `rgba(…)`) are
-  never touched. Give those a token by hand if the app accepts one.
+- themr rewrites the colour syntaxes the real configs use: `#rgb`/`#rrggbb`, CSS
+  `rgb(r, g, b)`/`rgba(r, g, b, a)`, and hypr's `rgba(RRGGBBaa)`/`0xAARRGGBB`. Alpha is
+  kept as-is. A `#rrggbbaa` in a *config* is treated as a colour of its own and is not
+  touched by a `#rrggbb` binding.
 - Plus and minus (`#000000` vs `#000000ff`) are treated as different colors, on purpose.
 - Applying only rewrites files. Reloading the app is up to the app: some pick it up
   automatically (Quickshell hot-reloads a saved config), others need a restart or a
@@ -148,7 +163,7 @@ never `white`.
 ## Development
 
 ```bash
-cargo test      # 26 unit tests over parsing, rewriting, adoption, key lines, backups, per-app overrides
+cargo test      # 32 unit tests over parsing, rewriting, adoption, key lines, backups, per-app overrides
 cargo clippy --all-targets -- -D warnings
 ```
 
