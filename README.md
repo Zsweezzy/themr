@@ -39,6 +39,11 @@ git clone https://github.com/Zsweezzy/themr
 cd themr
 cargo build --release
 install -Dm755 target/release/themr ~/.local/bin/themr
+
+# desktop entry, so it shows up in your app menu
+sed "s|^Exec=themr|Exec=$HOME/.local/bin/themr|" themr.desktop \
+  > ~/.local/share/applications/themr.desktop
+update-desktop-database ~/.local/share/applications
 ```
 
 Run it:
@@ -46,6 +51,8 @@ Run it:
 ```bash
 themr
 ```
+
+Or open it from your app menu (search "themr").
 
 Or bind a key in your compositor, e.g. Hyprland:
 

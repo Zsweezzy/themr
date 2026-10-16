@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=themr
+GenericName=Theme Manager
+Comment=Set one color theme across all your app configs
+Exec=themr
+Icon=preferences-desktop-color
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;
+Keywords=theme;colors;palette;config;kitty;waybar;
+StartupNotify=true
+StartupWMClass=themr
