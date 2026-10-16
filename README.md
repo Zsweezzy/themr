@@ -142,8 +142,12 @@ never `white`.
 ## Known limits
 
 - themr rewrites the hex it tracks, so a color you set by hand in a tracked file is
-  left alone, but a *value* that two different tokens share can't be told apart — themr
-  picks one and says so in the terminal.
+  left alone. Two *different tokens* can still share one value, though: a theme can give
+  e.g. `magenta` and `purple` the same hex (Nord does). Value-bound lines (whose key is
+  not a token name, like waybar's `#custom-gpu`) then can't be told apart — themr picks
+  one and says so in the terminal, so a round trip through such a theme can leave such a
+  line on its sibling's hue. Lines whose key *is* a token name are set line by line and
+  are never affected.
 - A line whose key is a token name (`background …`, `foreground = …`) now always follows
   that token, so its old value is rewritten on the first Apply. That is the one case where
   applying can change a hex themr has not written before.
@@ -163,7 +167,7 @@ never `white`.
 ## Development
 
 ```bash
-cargo test      # 32 unit tests over parsing, rewriting, adoption, key lines, backups, per-app overrides
+cargo test      # 33 unit tests over parsing, rewriting, adoption, key lines, backups, per-app overrides
 cargo clippy --all-targets -- -D warnings
 ```
 

@@ -430,6 +430,68 @@ fn key_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
     out
 }
 
+/// If `line` names a colour by key (`theme[main_bg]=`, `text-color:`), rewrite
+/// that line's colour to the theme's value and report the token it belongs to.
+/// Syntax and any alpha are kept.
+fn rewrite_key_line(line: &str, theme: &Theme) -> (String, Option<(String, String)>) {
+    let trimmed = line.trim_start();
+    let lead = line.len() - trimmed.len();
+    if trimmed.starts_with('#')
+        || trimmed.starts_with("//")
+        || trimmed.starts_with(';')
+        || trimmed.starts_with('!')
+    {
+        return (line.to_string(), None);
+    }
+    let end = trimmed
+        .find(|c: char| c == '=' || c == ':' || c.is_whitespace())
+        .unwrap_or(trimmed.len());
+    let Some(token) = resolve_key(&trimmed[..end], theme) else {
+        return (line.to_string(), None);
+    };
+    let body = &trimmed[end..];
+    let Some(lit) = scan_lits(body).into_iter().next() else {
+        return (line.to_string(), None);
+    };
+    let new = theme.colors[token].to_ascii_lowercase();
+    let rebuilt = rebuild(body, &lit, &new);
+    let out = format!(
+        "{}{}{}{}",
+        &line[..lead + end],
+        &body[..lit.start],
+        rebuilt,
+        &body[lit.end..]
+    );
+    (out, Some((token.to_string(), new)))
+}
+
+/// Set every key-named line to its token's value. Run last: a line that names a
+/// colour is authoritative, so two tokens that share one colour (Nord gives
+/// `magenta` and `purple` the same hex) can never fight over it — without this
+/// they alternately overwrite each other and never settle.
+fn apply_key_lines(text: &str, theme: &Theme) -> (String, BTreeMap<String, String>, usize) {
+    let mut out = String::with_capacity(text.len());
+    let mut written = BTreeMap::new();
+    let mut hits = 0;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (line, tail) = match rest.find('\n') {
+            Some(i) => (&rest[..i + 1], &rest[i + 1..]),
+            None => (rest, ""),
+        };
+        let (new_line, bound) = rewrite_key_line(line, theme);
+        if let Some((token, value)) = bound {
+            if new_line != line {
+                hits += 1;
+            }
+            written.insert(token, value);
+        }
+        out.push_str(&new_line);
+        rest = tail;
+    }
+    (out, written, hits)
+}
+
 /// Rewrite every color themr tracks in this file to the theme's value.
 /// `previous` is what themr wrote last time (token -> hex). On the first look
 /// at a file, palette-matching hex values are adopted instead of rewritten.
@@ -499,6 +561,15 @@ pub fn render(text: &str, theme: &Theme, previous: &BTreeMap<String, String>) ->
         out = next;
         replaced += hits;
         written.insert(token.clone(), new.clone());
+    }
+
+    // Key-named lines are authoritative and go last, so a colour two tokens
+    // share can never bind a token to the wrong line.
+    let (keyed, key_written, key_hits) = apply_key_lines(&out, theme);
+    out = keyed;
+    replaced += key_hits;
+    for (token, value) in key_written {
+        written.insert(token, value);
     }
 
     if written.is_empty() && previous.is_empty() && out == text {
@@ -820,5 +891,31 @@ mod tests {
         let r = render("text-color: #ff0000;\n", &t, &BTreeMap::new());
         assert_eq!(r.text, "text-color: #eeeeee;\n");
         assert_eq!(r.replaced, 1);
+    }
+
+    #[test]
+    fn tokens_sharing_a_colour_do_not_fight_over_one_value() {
+        // regression: Nord gives magenta and purple the same #b48ead, so btop's
+        // cpu_mid (purple) and upload_start (magenta) shared an old value and
+        // alternately overwrote each other on every apply, never settling
+        let t = parse_theme(
+            r##"{"colors":{"magenta":"#bb9af7","purple":"#9d7cd8"}}"##,
+            "k",
+        )
+        .unwrap();
+        let text = "theme[cpu_mid]=\"#b48ead\"\ntheme[upload_start]=\"#b48ead\"\ntheme[upload_mid]=\"#b48ead\"\n";
+        let mut prev = BTreeMap::new();
+        prev.insert("magenta".to_string(), "#b48ead".to_string());
+        prev.insert("purple".to_string(), "#b48ead".to_string());
+
+        let r1 = render(text, &t, &prev);
+        assert_eq!(
+            r1.text,
+            "theme[cpu_mid]=\"#9d7cd8\"\ntheme[upload_start]=\"#bb9af7\"\ntheme[upload_mid]=\"#9d7cd8\"\n"
+        );
+
+        let r2 = render(&r1.text, &t, &r1.written);
+        assert_eq!(r2.text, r1.text, "second apply must be a no-op");
+        assert_eq!(r2.replaced, 0);
     }
 }
