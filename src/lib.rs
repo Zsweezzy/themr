@@ -194,6 +194,17 @@ pub fn import_theme(json: &str, fallback_id: &str) -> Result<String, String> {
     Ok(id)
 }
 
+/// Create a new theme by copying `base`'s colors under a new name. Returns the id used.
+pub fn duplicate_theme(base: &Theme, name: &str) -> Result<String, String> {
+    let copy = Theme {
+        id: String::new(),
+        name: name.to_string(),
+        colors: base.colors.clone(),
+    };
+    let json = serde_json::to_string(&copy).map_err(|e| e.to_string())?;
+    import_theme(&json, name)
+}
+
 pub struct AppReport {
     pub app: String,
     pub theme: String,

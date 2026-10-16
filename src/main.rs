@@ -35,9 +35,10 @@ fn main() {
         .application_id("dev.themr.Themr")
         .build();
     app.connect_activate(|app| {
-        // The color swatch is natively a wide pill (40x24), so no border-radius
-        // can make it a circle. Pin the swatch square (40px matches its natural
-        // width) and round it fully. Priority must beat the user's
+        // The color swatch is natively a wide pill (40x24). Pin it square (40px
+        // is its natural width) and round the corners a little. The user's theme
+        // also squares off a dropdown's left corners (`dropdown button.toggle`
+        // gets `0 9px 9px 0`), so round those too. Priority must beat the user's
         // ~/.config/gtk-4.0/gtk.css, which GTK loads at USER priority.
         let css = gtk::CssProvider::new();
         css.load_from_data(
@@ -45,7 +46,11 @@ fn main() {
              button.color > colorswatch:only-child > overlay {\n\
                  min-width: 40px;\n\
                  min-height: 40px;\n\
-                 border-radius: 50%;\n\
+                 border-radius: 12px;\n\
+             }\n\
+             dropdown > button,\n\
+             dropdown > button.toggle {\n\
+                 border-radius: 12px;\n\
              }",
         );
 
@@ -63,11 +68,17 @@ fn main() {
 
         let header = gtk::HeaderBar::new();
         let import_btn = gtk::Button::with_label("Import JSON…");
+        let new_btn = gtk::Button::with_label("New theme");
         let add_btn = gtk::Button::with_label("Add app");
         header.pack_start(&import_btn);
+        header.pack_start(&new_btn);
         header.pack_start(&add_btn);
         win.set_titlebar(Some(&header));
 
+        {
+            let win = win.clone();
+            new_btn.connect_clicked(move |_| open_new_theme_dialog(&win));
+        }
         {
             let win = win.clone();
             add_btn.connect_clicked(move |_| open_add_dialog(&win));
@@ -458,6 +469,7 @@ fn rebuild(win: &gtk::ApplicationWindow) {
             let cell = gtk::Box::new(gtk::Orientation::Vertical, 3);
             cell.set_halign(gtk::Align::Center);
             let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
+            button.set_halign(gtk::Align::Center); // same square size for every token
             if let Some((r, g, b, a)) = hex_to_rgba(hex) {
                 button.set_rgba(&gdk::RGBA::new(r, g, b, a));
             }
@@ -635,6 +647,85 @@ fn open_add_dialog(win: &gtk::ApplicationWindow) {
             ));
             dialog.close();
             rebuild_later(&win);
+        });
+    }
+
+    dialog.present();
+}
+
+fn open_new_theme_dialog(win: &gtk::ApplicationWindow) {
+    let (_, themes, _) = load_all();
+    let edit_id = EDIT_THEME.with(|t| t.borrow().clone());
+    let base_id = if themes.contains_key(&edit_id) {
+        edit_id
+    } else if let Some(first) = themes.keys().next() {
+        first.clone()
+    } else {
+        set_status("cannot create a theme: no themes found in ~/.config/themr/themes");
+        return;
+    };
+
+    let dialog = gtk::Window::builder()
+        .title("New theme")
+        .transient_for(win)
+        .modal(true)
+        .default_width(400)
+        .build();
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    vbox.set_margin_top(14);
+    vbox.set_margin_bottom(14);
+    vbox.set_margin_start(14);
+    vbox.set_margin_end(14);
+
+    let name_entry = gtk::Entry::new();
+    name_entry.set_placeholder_text(Some("theme name, e.g. my-dark"));
+
+    let hint = gtk::Label::new(Some(&format!(
+        "Starts as a copy of '{base_id}'. Edit its colors afterwards."
+    )));
+    hint.set_xalign(0.0);
+    hint.set_wrap(true);
+    hint.set_opacity(0.7);
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let create = gtk::Button::with_label("Create");
+    create.add_css_class("suggested-action");
+    buttons.append(&cancel);
+    buttons.append(&create);
+
+    vbox.append(&name_entry);
+    vbox.append(&hint);
+    vbox.append(&buttons);
+    dialog.set_child(Some(&vbox));
+
+    {
+        let dialog = dialog.clone();
+        cancel.connect_clicked(move |_| dialog.close());
+    }
+    {
+        let dialog = dialog.clone();
+        let win = win.clone();
+        let base = themes[&base_id].clone();
+        create.connect_clicked(move |_| {
+            let name = name_entry.text().trim().to_string();
+            if name.is_empty() {
+                set_status("New theme: a name is required");
+                return;
+            }
+            match duplicate_theme(&base, &name) {
+                Ok(id) => {
+                    EDIT_THEME.with(|t| *t.borrow_mut() = id.clone());
+                    set_status(&format!(
+                        "created theme '{name}' ({id}) — edit its colors below, then Apply"
+                    ));
+                    dialog.close();
+                    rebuild_later(&win);
+                }
+                Err(e) => set_status(&format!("could not create theme: {e}")),
+            }
         });
     }
 

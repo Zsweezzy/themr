@@ -174,6 +174,41 @@ fn adopt_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
     adopted
 }
 
+/// A line that names a color by key (`background #222436`, `foreground = "#c8d3f5"`)
+/// ties that line to the token of the same name, even when the value is not in
+/// the palette. Without it, a value-only match can bind a token to any line that
+/// happens to share the color (kitty's `active_tab_foreground` instead of
+/// `background`), so editing the token never reaches the line the user means.
+fn key_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim_start();
+        if line.starts_with('#')
+            || line.starts_with("//")
+            || line.starts_with(';')
+            || line.starts_with('!')
+        {
+            continue; // comment
+        }
+        let end = line
+            .find(|c: char| c == '=' || c == ':' || c.is_whitespace())
+            .unwrap_or(line.len());
+        let key = &line[..end];
+        if !theme.colors.contains_key(key) {
+            continue;
+        }
+        // only the palette's own format (#rgb/#rrggbb), so a value with alpha
+        // (`#000000ff`) is not mistaken for the token's color
+        if let Some(hex) = scan_hexes(&line[end..])
+            .into_iter()
+            .find(|h| h.len() <= 7)
+        {
+            out.entry(key.to_string()).or_insert(hex);
+        }
+    }
+    out
+}
+
 /// Rewrite every color themr tracks in this file to the theme's value.
 /// `previous` is what themr wrote last time (token -> hex). On the first look
 /// at a file, palette-matching hex values are adopted instead of rewritten.
@@ -191,16 +226,22 @@ pub fn render(text: &str, theme: &Theme, previous: &BTreeMap<String, String>) ->
     } else {
         BTreeMap::new()
     };
+    let mut tracked = if previous.is_empty() {
+        adopted.clone()
+    } else {
+        previous.clone()
+    };
+    // A line that names a color by key is authoritative: it wins over a stale
+    // value-only match that pointed the token at some other line.
+    for (token, hex) in key_hexes(&out, theme) {
+        tracked.insert(token, hex);
+    }
     for (token, value) in &adopted {
         written
             .entry(token.clone())
             .or_insert_with(|| value.clone());
     }
-    let previous = if previous.is_empty() {
-        &adopted
-    } else {
-        previous
-    };
+    let previous = &tracked;
 
     // shortcut: same hex used for two tokens can only resolve to one new value; the first wins.
     let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
@@ -363,9 +404,9 @@ mod tests {
     #[test]
     fn apply_then_change_theme_then_restore() {
         let path = tmp("roundtrip");
-        fs::write(&path, "bg #ffffff\n# comment\n").unwrap();
+        fs::write(&path, "window_bg #ffffff\n# comment\n").unwrap();
 
-        // first apply only touches markers, so nothing changes
+        // first apply only touches markers (and key lines), so nothing changes
         let r1 = apply_file(&path, &theme(), &BTreeMap::new()).unwrap();
         assert_eq!(r1.status, FileStatus::Unchanged);
         assert!(!backup_path(&path).exists());
@@ -378,7 +419,7 @@ mod tests {
         assert_eq!(r2.status, FileStatus::Updated);
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "bg #111111\n# comment\n"
+            "window_bg #111111\n# comment\n"
         );
         assert!(backup_path(&path).exists());
 
@@ -387,7 +428,7 @@ mod tests {
         assert!(r3.contains("restored"));
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            "bg #ffffff\n# comment\n"
+            "window_bg #ffffff\n# comment\n"
         );
     }
 
@@ -463,5 +504,35 @@ mod tests {
             fs::read_to_string(backup_path(&path)).unwrap(),
             "bg #111111\n"
         );
+    }
+
+    #[test]
+    fn keyed_line_follows_its_token_even_when_value_is_not_in_the_palette() {
+        // kitty: `background #222436` must follow the `background` token, though
+        // the palette's background (#1e2030) is a different color
+        let t = parse_theme(r##"{"colors":{"background":"#1e2030"}}"##, "k").unwrap();
+        let r = render("background #222436\n", &t, &BTreeMap::new());
+        assert_eq!(r.text, "background #1e2030\n");
+        assert_eq!(r.written["background"], "#1e2030");
+        assert_eq!(r.replaced, 1);
+    }
+
+    #[test]
+    fn keyed_line_overrides_a_stale_value_binding() {
+        // regression: state held background -> #26a269 (another line's color),
+        // so editing `background` recolored the wrong line and never the real one
+        let t = parse_theme(r##"{"colors":{"background":"#1e2030"}}"##, "k").unwrap();
+        let mut prev = BTreeMap::new();
+        prev.insert("background".to_string(), "#26a269".to_string());
+        let r = render("background #222436\nactive_tab_foreground #26a269\n", &t, &prev);
+        assert_eq!(r.text, "background #1e2030\nactive_tab_foreground #26a269\n");
+    }
+
+    #[test]
+    fn keyed_line_with_alpha_is_left_alone() {
+        let t = parse_theme(r##"{"colors":{"bg":"#111111"}}"##, "k").unwrap();
+        let r = render("bg #000000ff\n", &t, &BTreeMap::new());
+        assert_eq!(r.text, "bg #000000ff\n");
+        assert_eq!(r.replaced, 0);
     }
 }

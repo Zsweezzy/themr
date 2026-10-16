@@ -21,6 +21,10 @@ one GUI.
    is *adopted* automatically — the values are left alone and themr starts tracking them
    (the status line says how many). No markup needed. Any file can also contain
    `{{token}}`, where *token* is a color name from the theme (`{{primary}}`, `{{background}}`, …).
+   A line that names a color by a token (`background #222436`, `foreground = "#c8d3f5"`)
+   is tracked under that name too, so it follows the token even when its value is not in
+   the palette — this is what makes, say, kitty's `background` line respond to the
+   `background` token.
 2. **themr replaces markers with hex values** on Apply, and remembers what it wrote for each
    file in `~/.config/themr/state.json`.
 3. **Switch theme → Apply →** the hex values themr tracks are swapped for the new
@@ -68,6 +72,8 @@ hl.bind("SUPER", "T", hl.dsp.exec_cmd("themr"))
 - **Each app row** — shows its files and its effective theme, with its own dropdown
   (`Global (…)` or a specific theme), *Apply*, *Restore*, and *✕* to remove it from themr.
 - **Import JSON…** — load a community theme from a `.json` file.
+- **New theme** — name it and it starts as a copy of the theme you are editing; tweak the
+  colors, then Apply.
 - **Add app** — a name plus one config file path per line (`~` works).
 - **Colors of &lt;theme&gt;** — swatch per token, edits save to disk instantly; press an
   Apply button to push them into the apps.
@@ -125,6 +131,9 @@ never `white`.
 - themr rewrites the hex it tracks, so a color you set by hand in a tracked file is
   left alone, but a *value* that two different tokens share can't be told apart — themr
   picks one and says so in the terminal.
+- A line whose key is a token name (`background …`, `foreground = …`) now always follows
+  that token, so its old value is rewritten on the first Apply. That is the one case where
+  applying can change a hex themr has not written before.
 - Adoption only recognises values that exactly match the theme, case-insensitively. A
   file whose palette is a *different* variant of the same theme (e.g. Tokyo Night Storm
   hexes against a Tokyo Night Moon theme) adopts only the few colors that coincide; the
@@ -139,7 +148,7 @@ never `white`.
 ## Development
 
 ```bash
-cargo test      # 23 unit tests over parsing, rewriting, adoption, backups, per-app overrides
+cargo test      # 26 unit tests over parsing, rewriting, adoption, key lines, backups, per-app overrides
 cargo clippy --all-targets -- -D warnings
 ```
 
