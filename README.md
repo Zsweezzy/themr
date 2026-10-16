@@ -77,6 +77,9 @@ hl.bind("SUPER", "T", hl.dsp.exec_cmd("themr"))
 - **New theme** — name it and it starts as a copy of the theme you are editing; tweak the
   colors, then Apply.
 - **Add app** — a name plus one config file path per line (`~` works).
+- **Detect apps** — adds every app themr ships a preset for whose config actually exists
+  on this machine, skipping the ones already listed. Presets only seed a *new* config, so
+  this is how an existing config picks up apps added since. Press *Apply to all apps* after.
 - **Colors of &lt;theme&gt;** — swatch per token, edits save to disk instantly; press an
   Apply button to push them into the apps.
 
@@ -114,6 +117,47 @@ files = ["~/.config/btop/btop.conf", "~/.config/btop/themes/tokyo-night-moon.the
 [apps.rofi]
 files = ["~/.config/rofi/config.rasi", "~/.local/share/rofi/themes/tokyonight-moon.rasi"]
 ```
+
+### Bundled app presets
+
+themr knows the usual config location and reload command for these apps. A preset is only
+added when its file exists, so the ones you do not run cost nothing. Paths with several
+entries list every one that exists.
+
+| App | Config file(s) | Reload |
+| --- | --- | --- |
+| kitty | `~/.config/kitty/current-theme.conf` | `pkill -SIGUSR1 -x kitty` |
+| alacritty | `alacritty.toml`, `alacritty.yml` | watches its own config |
+| wezterm | `wezterm.lua` | watches its own config |
+| foot | `foot.ini` | next launch |
+| ghostty | `config` | next launch |
+| waybar | `style.css`, `config.jsonc`, `config` | `pkill -SIGUSR2 -x waybar` |
+| eww | `eww.scss`, `eww.css`, `bar/eww.scss` | `eww reload` |
+| polybar | `config.ini`, `config` | `polybar-msg cmd restart` |
+| ags | `style.scss` | next launch |
+| rofi | `config.rasi` | next launch |
+| wofi | `style.css` | next launch |
+| fuzzel | `fuzzel.ini` | next launch |
+| tofi | `config` | next launch |
+| anyrun | `style.css` | next launch |
+| dunst | `dunstrc` | `dunstctl reload` |
+| mako | `config` | `makoctl reload` |
+| swaync | `style.css` | `swaync-client -rs` |
+| hypr | `hyprland.conf`, `hyprland.lua` | `hyprctl reload` |
+| niri | `config.kdl` | niri reloads a saved config itself |
+| sway | `config` | `swaymsg reload` |
+| i3 | `config` | `i3-msg reload` |
+| hyprlock / swaylock | `hyprlock.conf` / `swaylock/config` | next lock |
+| wlogout | `style.css` | next launch |
+| qt | `~/.config/Trolltech.conf` | next launch |
+| Xresources | `~/.Xresources` | `xrdb -merge ~/.Xresources` |
+| btop / cava | `btop.conf` / `cava/config` | next launch |
+| starship | `starship.toml` | next prompt |
+| yazi | `theme.toml` | next launch |
+| zellij | `config.kdl` | next launch |
+| tmux | `tmux.conf` / `~/.tmux.conf` | `tmux source-file <your file>` |
+| lsd / lf / bat / eza | `colors.yaml` / `colors` / `config` / `theme.yml` | next launch |
+| zathura | `zathurarc` | next launch |
 
 ## Theme format
 
@@ -162,17 +206,26 @@ never `white`.
   kept as-is. A `#rrggbbaa` in a *config* is treated as a colour of its own and is not
   touched by a `#rrggbb` binding.
 - Plus and minus (`#000000` vs `#000000ff`) are treated as different colors, on purpose.
+- No GTK preset, on purpose. A `gtk.css` is usually a whole *generated* theme with
+  hundreds of distinct colours; themr maps colours onto a ~20-token palette, so pointing
+  it at one collapses every accent onto the background colour and the UI goes flat. If
+  your `gtk.css` is a small hand-written override it is fine to add by hand.
+- KDE configs are not supported: `kdeglobals`, `~/.local/share/color-schemes/*.colors`
+  and Konsole `.colorscheme` files write colours as decimal `R,G,B` triples, not hex, and
+  themr only rewrites `#hex`, `rgb()`/`rgba()` and hypr's `rgba()`/`0x`. `Trolltech.conf`
+  (Qt palette) *is* hex and has a preset.
 - Applying rewrites files, then runs the app's `reload` command if it has one, so the
   change is visible without a manual restart. Kitty needs `pkill -SIGUSR1 -x kitty`,
-  waybar `pkill -SIGUSR2 -x waybar`, Hyprland `hyprctl reload`; Quickshell hot-reloads on
-  its own, and btop only reads its theme at startup (restart it). An app with no `reload`
-  is just written and left alone. The command runs through the shell, so `|| true` is
-  honoured — use it when "app not running" should not be reported as a failure.
+  waybar `pkill -SIGUSR2 -x waybar`, Hyprland `hyprctl reload`; alacritty, wezterm and niri
+  watch their own config; Quickshell hot-reloads on its own, and btop only reads its theme
+  at startup (restart it). An app with no `reload` is just written and left alone. The
+  command runs through the shell, so `|| true` is honoured — use it when "app not running"
+  should not be reported as a failure.
 
 ## Development
 
 ```bash
-cargo test      # 36 unit tests over parsing, rewriting, adoption, key lines, reloads, backups, per-app overrides
+cargo test      # 38 unit tests over parsing, rewriting, adoption, key lines, reloads, presets, backups, per-app overrides
 cargo clippy --all-targets -- -D warnings
 ```
 

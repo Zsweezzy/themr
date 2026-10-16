@@ -70,9 +70,11 @@ fn main() {
         let import_btn = gtk::Button::with_label("Import JSON…");
         let new_btn = gtk::Button::with_label("New theme");
         let add_btn = gtk::Button::with_label("Add app");
+        let detect_btn = gtk::Button::with_label("Detect apps");
         header.pack_start(&import_btn);
         header.pack_start(&new_btn);
         header.pack_start(&add_btn);
+        header.pack_start(&detect_btn);
         win.set_titlebar(Some(&header));
 
         {
@@ -82,6 +84,33 @@ fn main() {
         {
             let win = win.clone();
             add_btn.connect_clicked(move |_| open_add_dialog(&win));
+        }
+        {
+            let win = win.clone();
+            detect_btn.connect_clicked(move |_| {
+                let mut cfg = load_config().unwrap_or_default();
+                let found = detect_apps(&cfg);
+                if found.is_empty() {
+                    set_status(
+                        "Detect apps: nothing new — every app themr knows is either listed or has no config here",
+                    );
+                    return;
+                }
+                let names: Vec<String> = found.iter().map(|(n, _)| n.clone()).collect();
+                for (name, app) in found {
+                    cfg.apps.insert(name, app);
+                }
+                if let Err(e) = save_config(&cfg) {
+                    eprintln!("{e}");
+                    set_status(&format!("Detect apps: could not save config: {e}"));
+                    return;
+                }
+                set_status(&format!(
+                    "Detect apps: added {} — press 'Apply to all apps'",
+                    names.join(", ")
+                ));
+                rebuild_later(&win);
+            });
         }
         {
             let win = win.clone();

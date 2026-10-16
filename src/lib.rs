@@ -23,23 +23,243 @@ pub const BUILTIN_THEMES: [(&str, &str); 4] = [
     ("nord", include_str!("../themes/nord.json")),
 ];
 
-/// Which real config file each bundled app points at, and how to make it re-read
-/// that file. Only seeded if the file exists.
-const PRESET_APPS: [(&str, &str, Option<&str>); 6] = [
-    (
-        "kitty",
-        "~/.config/kitty/current-theme.conf",
-        Some("pkill -SIGUSR1 -x kitty || true"),
-    ),
-    (
-        "waybar",
-        "~/.config/waybar/style.css",
-        Some("pkill -SIGUSR2 -x waybar || true"),
-    ),
-    ("hypr", "~/.config/hypr/hyprland.lua", Some("hyprctl reload")),
-    ("btop", "~/.config/btop/btop.conf", None),
-    ("cava", "~/.config/cava/config", None),
-    ("rofi", "~/.config/rofi/config.rasi", None),
+/// A bundled app preset: the config files worth theming, and how to make the app
+/// re-read them. Files that do not exist on this machine are skipped, so a preset
+/// that does not match your setup costs nothing.
+struct Preset {
+    app: &'static str,
+    files: &'static [&'static str],
+    /// `None` when the app needs no nudge (it watches its config, or reads it on
+    /// the next launch). Only commands that are safe to repeat belong here.
+    reload: Option<&'static str>,
+}
+
+const SIGUSR1_KITTY: &str = "pkill -SIGUSR1 -x kitty || true";
+const SIGUSR2_WAYBAR: &str = "pkill -SIGUSR2 -x waybar || true";
+// A reload only makes sense while the app runs, and some clients block forever
+// waiting for a daemon that is not there (swaync-client does), which would hang
+// the whole Apply — so each is gated on the process existing.
+const RELOAD_EWW: &str = "pgrep -x eww >/dev/null && eww reload || true";
+const RELOAD_POLYBAR: &str = "pgrep -x polybar >/dev/null && polybar-msg cmd restart || true";
+const RELOAD_DUNST: &str = "pgrep -x dunst >/dev/null && dunstctl reload || true";
+const RELOAD_MAKO: &str = "pgrep -x mako >/dev/null && makoctl reload || true";
+const RELOAD_SWAYNC: &str = "pgrep -x swaync >/dev/null && swaync-client -rs || true";
+const RELOAD_HYPR: &str = "pgrep -x Hyprland >/dev/null && hyprctl reload || true";
+const RELOAD_SWAY: &str = "pgrep -x sway >/dev/null && swaymsg reload || true";
+const RELOAD_I3: &str = "pgrep -x i3 >/dev/null && i3-msg reload || true";
+
+const PRESETS: &[Preset] = &[
+    // ---- terminals ----
+    Preset {
+        app: "kitty",
+        files: &["~/.config/kitty/current-theme.conf"],
+        reload: Some(SIGUSR1_KITTY),
+    },
+    // alacritty and wezterm watch their own config, so there is nothing to run
+    Preset {
+        app: "alacritty",
+        files: &[
+            "~/.config/alacritty/alacritty.toml",
+            "~/.config/alacritty/alacritty.yml",
+        ],
+        reload: None,
+    },
+    Preset {
+        app: "wezterm",
+        files: &["~/.config/wezterm/wezterm.lua"],
+        reload: None,
+    },
+    Preset {
+        app: "foot",
+        files: &["~/.config/foot/foot.ini"],
+        reload: None,
+    },
+    Preset {
+        app: "ghostty",
+        files: &["~/.config/ghostty/config"],
+        reload: None,
+    },
+    // ---- bars and shells ----
+    Preset {
+        app: "waybar",
+        files: &[
+            "~/.config/waybar/style.css",
+            "~/.config/waybar/config.jsonc",
+            "~/.config/waybar/config",
+        ],
+        reload: Some(SIGUSR2_WAYBAR),
+    },
+    Preset {
+        app: "eww",
+        files: &[
+            "~/.config/eww/eww.scss",
+            "~/.config/eww/eww.css",
+            "~/.config/eww/bar/eww.scss",
+        ],
+        reload: Some(RELOAD_EWW),
+    },
+    Preset {
+        app: "polybar",
+        files: &["~/.config/polybar/config.ini", "~/.config/polybar/config"],
+        reload: Some(RELOAD_POLYBAR),
+    },
+    Preset {
+        app: "ags",
+        files: &["~/.config/ags/style.scss"],
+        reload: None,
+    },
+    // ---- launchers ----
+    Preset {
+        app: "rofi",
+        files: &["~/.config/rofi/config.rasi"],
+        reload: None,
+    },
+    Preset {
+        app: "wofi",
+        files: &["~/.config/wofi/style.css"],
+        reload: None,
+    },
+    Preset {
+        app: "fuzzel",
+        files: &["~/.config/fuzzel/fuzzel.ini"],
+        reload: None,
+    },
+    Preset {
+        app: "tofi",
+        files: &["~/.config/tofi/config"],
+        reload: None,
+    },
+    Preset {
+        app: "anyrun",
+        files: &["~/.config/anyrun/style.css"],
+        reload: None,
+    },
+    // ---- notifications ----
+    Preset {
+        app: "dunst",
+        files: &["~/.config/dunst/dunstrc"],
+        reload: Some(RELOAD_DUNST),
+    },
+    Preset {
+        app: "mako",
+        files: &["~/.config/mako/config"],
+        reload: Some(RELOAD_MAKO),
+    },
+    Preset {
+        app: "swaync",
+        files: &["~/.config/swaync/style.css"],
+        reload: Some(RELOAD_SWAYNC),
+    },
+    // ---- compositors ----
+    Preset {
+        app: "hypr",
+        files: &[
+            "~/.config/hypr/hyprland.conf",
+            "~/.config/hypr/hyprland.lua",
+        ],
+        reload: Some(RELOAD_HYPR),
+    },
+    // niri reloads a saved config by itself
+    Preset {
+        app: "niri",
+        files: &["~/.config/niri/config.kdl"],
+        reload: None,
+    },
+    Preset {
+        app: "sway",
+        files: &["~/.config/sway/config"],
+        reload: Some(RELOAD_SWAY),
+    },
+    Preset {
+        app: "i3",
+        files: &["~/.config/i3/config"],
+        reload: Some(RELOAD_I3),
+    },
+    Preset {
+        app: "hyprlock",
+        files: &["~/.config/hypr/hyprlock.conf"],
+        reload: None,
+    },
+    Preset {
+        app: "swaylock",
+        files: &["~/.config/swaylock/config"],
+        reload: None,
+    },
+    Preset {
+        app: "wlogout",
+        files: &["~/.config/wlogout/style.css"],
+        reload: None,
+    },
+    // No GTK preset on purpose: gtk.css is usually a whole generated theme with
+    // hundreds of distinct colours, and collapsing those onto one theme's ~20
+    // turns every accent into the background colour. Point themr at a small
+    // hand-written gtk.css yourself if that is not the case for you.
+    Preset {
+        app: "qt",
+        files: &["~/.config/Trolltech.conf"],
+        reload: None,
+    },
+    Preset {
+        app: "xresources",
+        files: &["~/.Xresources"],
+        reload: Some("xrdb -merge ~/.Xresources || true"),
+    },
+    // ---- system monitors, editors, CLIs ----
+    Preset {
+        app: "btop",
+        files: &["~/.config/btop/btop.conf"],
+        reload: None,
+    },
+    Preset {
+        app: "cava",
+        files: &["~/.config/cava/config"],
+        reload: None,
+    },
+    Preset {
+        app: "starship",
+        files: &["~/.config/starship.toml"],
+        reload: None,
+    },
+    Preset {
+        app: "yazi",
+        files: &["~/.config/yazi/theme.toml"],
+        reload: None,
+    },
+    Preset {
+        app: "zellij",
+        files: &["~/.config/zellij/config.kdl"],
+        reload: None,
+    },
+    Preset {
+        app: "tmux",
+        files: &["~/.config/tmux/tmux.conf", "~/.tmux.conf"],
+        reload: None,
+    },
+    Preset {
+        app: "lsd",
+        files: &["~/.config/lsd/colors.yaml"],
+        reload: None,
+    },
+    Preset {
+        app: "lf",
+        files: &["~/.config/lf/colors"],
+        reload: None,
+    },
+    Preset {
+        app: "bat",
+        files: &["~/.config/bat/config"],
+        reload: None,
+    },
+    Preset {
+        app: "eza",
+        files: &["~/.config/eza/theme.yml"],
+        reload: None,
+    },
+    Preset {
+        app: "zathura",
+        files: &["~/.config/zathura/zathurarc"],
+        reload: None,
+    },
 ];
 
 pub fn config_home() -> PathBuf {
@@ -82,23 +302,53 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// A preset's files that exist under `home`, in preset order.
+fn existing_files(preset: &Preset, home: &Path) -> Vec<String> {
+    preset
+        .files
+        .iter()
+        .filter(|rel| {
+            let rel_path = rel.strip_prefix("~/").unwrap_or(rel);
+            home.join(rel_path).exists()
+        })
+        .map(|rel| rel.to_string())
+        .collect()
+}
+
+/// The config for a preset, or `None` when none of its files exist here.
+fn preset_config(preset: &Preset, home: &Path) -> Option<AppConfig> {
+    let files = existing_files(preset, home);
+    (!files.is_empty()).then(|| AppConfig {
+        theme: None,
+        files,
+        reload: preset.reload.map(str::to_string),
+    })
+}
+
 /// Preset apps whose config file actually exists under `home`.
 fn seed_apps(home: &Path) -> BTreeMap<String, AppConfig> {
     let mut apps = BTreeMap::new();
-    for (app, rel, reload) in PRESET_APPS {
-        let rel_path = rel.strip_prefix("~/").unwrap_or(rel);
-        if home.join(rel_path).exists() {
-            apps.insert(
-                app.to_string(),
-                AppConfig {
-                    theme: None,
-                    files: vec![rel.to_string()],
-                    reload: reload.map(str::to_string),
-                },
-            );
+    for preset in PRESETS {
+        if let Some(app) = preset_config(preset, home) {
+            apps.insert(preset.app.to_string(), app);
         }
     }
     apps
+}
+
+fn detect_apps_in(home: &Path, cfg: &ThemrConfig) -> Vec<(String, AppConfig)> {
+    PRESETS
+        .iter()
+        .filter(|p| !cfg.apps.contains_key(p.app))
+        .filter_map(|p| preset_config(p, home).map(|app| (p.app.to_string(), app)))
+        .collect()
+}
+
+/// Apps themr knows about that have a config file on this machine but are not in
+/// `cfg` yet. Seeding only happens for a brand new config, so this is how an
+/// existing one picks up presets added later.
+pub fn detect_apps(cfg: &ThemrConfig) -> Vec<(String, AppConfig)> {
+    detect_apps_in(&home_dir(), cfg)
 }
 
 /// First launch: themes, config with app presets, empty state.
@@ -363,6 +613,83 @@ mod tests {
             apps["kitty"].reload.as_deref(),
             Some("pkill -SIGUSR1 -x kitty || true")
         );
+        // the preset table carries a broad set of apps
+        assert!(PRESETS.len() >= 30, "expected a broad preset table");
+    }
+
+    #[test]
+    fn collects_every_preset_file_that_exists() {
+        let home = tmpdir("seed-multi");
+        fs::create_dir_all(home.join(".config/waybar")).unwrap();
+        fs::write(home.join(".config/waybar/style.css"), "a { color: #000; }\n").unwrap();
+        fs::write(home.join(".config/waybar/config.jsonc"), "{}\n").unwrap();
+
+        let apps = seed_apps(&home);
+        assert_eq!(
+            apps["waybar"].files,
+            vec![
+                "~/.config/waybar/style.css".to_string(),
+                "~/.config/waybar/config.jsonc".to_string()
+            ],
+            "existing files of an app are listed, missing ones are dropped"
+        );
+    }
+
+    #[test]
+    fn preset_reloads_can_not_hang_or_fail_when_the_app_is_absent() {
+        for p in PRESETS {
+            let Some(cmd) = p.reload else { continue };
+            assert!(
+                cmd.contains("|| true"),
+                "{} reload must tolerate the app not running: {cmd}",
+                p.app
+            );
+            // A daemon client (swaync-client, eww, …) blocks forever waiting for a
+            // daemon that is not there, which would hang the whole Apply. pkill and
+            // pgrep either find the process or exit immediately. xrdb needs no daemon.
+            assert!(
+                cmd.starts_with("pkill ")
+                    || cmd.starts_with("pgrep ")
+                    || cmd.starts_with("xrdb "),
+                "{} reload must not call a daemon client unguarded: {cmd}",
+                p.app
+            );
+        }
+    }
+
+    #[test]
+    fn detect_apps_adds_only_what_is_missing() {
+        let home = tmpdir("detect");
+        fs::create_dir_all(home.join(".config/kitty")).unwrap();
+        fs::create_dir_all(home.join(".config/waybar")).unwrap();
+        fs::create_dir_all(home.join(".config/nvim")).unwrap();
+        fs::write(home.join(".config/kitty/current-theme.conf"), "b #000000\n").unwrap();
+        fs::write(home.join(".config/waybar/style.css"), "a { color: #000; }\n").unwrap();
+        fs::write(home.join(".config/nvim/init.lua"), "-- nothing to theme\n").unwrap();
+
+        // kitty already handled, waybar not; nvim is not a preset
+        let mut cfg = ThemrConfig::default();
+        cfg.apps.insert(
+            "kitty".into(),
+            AppConfig {
+                theme: None,
+                files: vec!["~/.config/kitty/current-theme.conf".into()],
+                reload: None,
+            },
+        );
+
+        let found = detect_apps_in(&home, &cfg);
+        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["waybar"], "only the missing preset with a file here");
+        assert_eq!(found[0].1.files, vec!["~/.config/waybar/style.css"]);
+        assert_eq!(
+            found[0].1.reload.as_deref(),
+            Some("pkill -SIGUSR2 -x waybar || true")
+        );
+
+        // running it again after adding finds nothing new
+        cfg.apps.insert(found[0].0.clone(), found[0].1.clone());
+        assert!(detect_apps_in(&home, &cfg).is_empty());
     }
 
     #[test]
