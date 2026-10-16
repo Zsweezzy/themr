@@ -597,6 +597,15 @@ fn open_add_dialog(win: &gtk::ApplicationWindow) {
         .vexpand(true)
         .build();
 
+    let reload_hint = gtk::Label::new(Some(
+        "Reload command, optional — run after a write so the app re-reads, e.g. pkill -SIGUSR1 -x kitty:",
+    ));
+    reload_hint.set_xalign(0.0);
+    reload_hint.set_opacity(0.7);
+
+    let reload_entry = gtk::Entry::new();
+    reload_entry.set_placeholder_text(Some("optional shell command"));
+
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     buttons.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
@@ -608,6 +617,8 @@ fn open_add_dialog(win: &gtk::ApplicationWindow) {
     vbox.append(&name_entry);
     vbox.append(&hint);
     vbox.append(&scroll);
+    vbox.append(&reload_hint);
+    vbox.append(&reload_entry);
     vbox.append(&buttons);
     dialog.set_child(Some(&vbox));
 
@@ -636,8 +647,16 @@ fn open_add_dialog(win: &gtk::ApplicationWindow) {
                 return;
             }
             let mut cfg = load_config().unwrap_or_default();
-            cfg.apps
-                .insert(name.clone(), AppConfig { theme: None, files });
+            let reload = reload_entry.text().to_string();
+            let reload = reload.trim();
+            cfg.apps.insert(
+                name.clone(),
+                AppConfig {
+                    theme: None,
+                    files,
+                    reload: (!reload.is_empty()).then(|| reload.to_string()),
+                },
+            );
             if let Err(e) = save_config(&cfg) {
                 eprintln!("{e}");
                 return;

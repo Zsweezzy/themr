@@ -97,9 +97,11 @@ theme = "tokyonight-moon"        # the global theme
 [apps.kitty]
 files = ["~/.config/kitty/current-theme.conf"]
 theme = "catppuccin-mocha"      # optional per-app override
+reload = "pkill -SIGUSR1 -x kitty || true"   # optional: run after a write
 
 [apps.waybar]
 files = ["~/.config/waybar/style.css"]
+reload = "pkill -SIGUSR2 -x waybar || true"
 ```
 
 An app whose config only *names* a theme (btop's `color_theme`, rofi's `@theme`) keeps its
@@ -160,14 +162,17 @@ never `white`.
   kept as-is. A `#rrggbbaa` in a *config* is treated as a colour of its own and is not
   touched by a `#rrggbb` binding.
 - Plus and minus (`#000000` vs `#000000ff`) are treated as different colors, on purpose.
-- Applying only rewrites files. Reloading the app is up to the app: some pick it up
-  automatically (Quickshell hot-reloads a saved config), others need a restart or a
-  signal.
+- Applying rewrites files, then runs the app's `reload` command if it has one, so the
+  change is visible without a manual restart. Kitty needs `pkill -SIGUSR1 -x kitty`,
+  waybar `pkill -SIGUSR2 -x waybar`, Hyprland `hyprctl reload`; Quickshell hot-reloads on
+  its own, and btop only reads its theme at startup (restart it). An app with no `reload`
+  is just written and left alone. The command runs through the shell, so `|| true` is
+  honoured — use it when "app not running" should not be reported as a failure.
 
 ## Development
 
 ```bash
-cargo test      # 33 unit tests over parsing, rewriting, adoption, key lines, backups, per-app overrides
+cargo test      # 36 unit tests over parsing, rewriting, adoption, key lines, reloads, backups, per-app overrides
 cargo clippy --all-targets -- -D warnings
 ```
 

@@ -23,14 +23,23 @@ pub const BUILTIN_THEMES: [(&str, &str); 4] = [
     ("nord", include_str!("../themes/nord.json")),
 ];
 
-/// Which real config files each bundled app points at. Only seeded if the file exists.
-const PRESET_APPS: [(&str, &str); 6] = [
-    ("kitty", "~/.config/kitty/current-theme.conf"),
-    ("waybar", "~/.config/waybar/style.css"),
-    ("hypr", "~/.config/hypr/hyprland.lua"),
-    ("btop", "~/.config/btop/btop.conf"),
-    ("cava", "~/.config/cava/config"),
-    ("rofi", "~/.config/rofi/config.rasi"),
+/// Which real config file each bundled app points at, and how to make it re-read
+/// that file. Only seeded if the file exists.
+const PRESET_APPS: [(&str, &str, Option<&str>); 6] = [
+    (
+        "kitty",
+        "~/.config/kitty/current-theme.conf",
+        Some("pkill -SIGUSR1 -x kitty || true"),
+    ),
+    (
+        "waybar",
+        "~/.config/waybar/style.css",
+        Some("pkill -SIGUSR2 -x waybar || true"),
+    ),
+    ("hypr", "~/.config/hypr/hyprland.lua", Some("hyprctl reload")),
+    ("btop", "~/.config/btop/btop.conf", None),
+    ("cava", "~/.config/cava/config", None),
+    ("rofi", "~/.config/rofi/config.rasi", None),
 ];
 
 pub fn config_home() -> PathBuf {
@@ -76,7 +85,7 @@ fn home_dir() -> PathBuf {
 /// Preset apps whose config file actually exists under `home`.
 fn seed_apps(home: &Path) -> BTreeMap<String, AppConfig> {
     let mut apps = BTreeMap::new();
-    for (app, rel) in PRESET_APPS {
+    for (app, rel, reload) in PRESET_APPS {
         let rel_path = rel.strip_prefix("~/").unwrap_or(rel);
         if home.join(rel_path).exists() {
             apps.insert(
@@ -84,6 +93,7 @@ fn seed_apps(home: &Path) -> BTreeMap<String, AppConfig> {
                 AppConfig {
                     theme: None,
                     files: vec![rel.to_string()],
+                    reload: reload.map(str::to_string),
                 },
             );
         }
@@ -253,7 +263,33 @@ pub fn apply_app(
             Err(e) => report.errors.push(e),
         }
     }
+    // Only nudge the app when a file actually changed, so a repeat Apply is a no-op.
+    if report.files.iter().any(|f| f.status == FileStatus::Updated)
+        && let Some(cmd) = app.reload.as_deref()
+        && let Err(e) = run_reload(cmd)
+    {
+        report.errors.push(format!("reload: {e}"));
+    }
     report
+}
+
+/// Run one app's reload command through the shell, so pipes and `|| true` work.
+fn run_reload(cmd: &str) -> Result<(), String> {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .map_err(|e| format!("{cmd}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let detail = stderr.trim();
+    Err(if detail.is_empty() {
+        format!("{cmd}: {e}", e = out.status)
+    } else {
+        format!("{cmd}: {detail}")
+    })
 }
 
 /// Apply every app. Returns one report per app, in config order.
@@ -322,6 +358,11 @@ mod tests {
         );
         // stored path stays portable instead of expanding to this machine's home
         assert_eq!(apps["kitty"].files[0], "~/.config/kitty/current-theme.conf");
+        // kitty is nudged after a write so the running terminal re-reads the file
+        assert_eq!(
+            apps["kitty"].reload.as_deref(),
+            Some("pkill -SIGUSR1 -x kitty || true")
+        );
     }
 
     #[test]
@@ -339,6 +380,7 @@ mod tests {
             AppConfig {
                 theme: None,
                 files: vec![file.to_string_lossy().into_owned()],
+                reload: None,
             },
         );
         let mut themes = BTreeMap::new();
@@ -387,6 +429,7 @@ mod tests {
             AppConfig {
                 theme: None,
                 files: vec![file.to_string_lossy().into_owned()],
+                reload: None,
             },
         );
 
@@ -394,5 +437,63 @@ mod tests {
         let report = apply_app("x", &cfg, &BTreeMap::new(), &mut state);
         assert!(report.errors[0].contains("not found"));
         assert_eq!(fs::read_to_string(&file).unwrap(), "bg {{background}}\n");
+    }
+
+    #[test]
+    fn reload_runs_only_when_a_file_changed() {
+        let dir = tmpdir("reload");
+        let file = dir.join("colors.conf");
+        let flag = dir.join("flag");
+        fs::write(&file, "bg {{background}}\n").unwrap();
+
+        let mut cfg = ThemrConfig {
+            theme: "a".into(),
+            apps: BTreeMap::new(),
+        };
+        cfg.apps.insert(
+            "kitty".into(),
+            AppConfig {
+                theme: None,
+                files: vec![file.to_string_lossy().into_owned()],
+                reload: Some(format!("printf x >> {}", flag.display())),
+            },
+        );
+        let mut themes = BTreeMap::new();
+        themes.insert("a".into(), theme("a", "#111111"));
+
+        let mut state = State::default();
+        let first = apply_app("kitty", &cfg, &themes, &mut state);
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert_eq!(fs::read_to_string(&flag).unwrap(), "x");
+
+        // nothing changed this time, so the app must not be reloaded again
+        let second = apply_app("kitty", &cfg, &themes, &mut state);
+        assert!(second.errors.is_empty(), "{:?}", second.errors);
+        assert_eq!(fs::read_to_string(&flag).unwrap(), "x");
+    }
+
+    #[test]
+    fn failed_reload_is_reported() {
+        let dir = tmpdir("reload-fail");
+        let file = dir.join("colors.conf");
+        fs::write(&file, "bg {{background}}\n").unwrap();
+        let mut cfg = ThemrConfig {
+            theme: "a".into(),
+            apps: BTreeMap::new(),
+        };
+        cfg.apps.insert(
+            "x".into(),
+            AppConfig {
+                theme: None,
+                files: vec![file.to_string_lossy().into_owned()],
+                reload: Some("echo boom >&2; exit 3".into()),
+            },
+        );
+        let mut themes = BTreeMap::new();
+        themes.insert("a".into(), theme("a", "#111111"));
+
+        let mut state = State::default();
+        let report = apply_app("x", &cfg, &themes, &mut state);
+        assert!(report.errors[0].contains("boom"), "{:?}", report.errors);
     }
 }

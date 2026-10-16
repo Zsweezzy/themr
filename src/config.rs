@@ -9,6 +9,9 @@ pub struct AppConfig {
     pub theme: Option<String>,
     #[serde(default)]
     pub files: Vec<String>,
+    /// Shell command run after this app's files are written, to make it re-read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reload: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,12 +61,39 @@ mod tests {
             AppConfig {
                 theme: Some("gruvbox-dark".into()),
                 files: vec![],
+                reload: None,
             },
         );
         cfg.apps.insert("waybar".into(), AppConfig::default());
         assert_eq!(cfg.app_theme("kitty"), "gruvbox-dark");
         assert_eq!(cfg.app_theme("waybar"), "nord");
         assert_eq!(cfg.app_theme("unknown"), "nord");
+    }
+
+    #[test]
+    fn reload_command_is_optional_and_parses() {
+        let cfg: ThemrConfig = toml::from_str(
+            r#"
+theme = "nord"
+
+[apps.kitty]
+files = ["~/.config/kitty/current-theme.conf"]
+reload = "pkill -SIGUSR1 -x kitty"
+
+[apps.btop]
+files = ["~/.config/btop/btop.conf"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.apps["kitty"].reload.as_deref(),
+            Some("pkill -SIGUSR1 -x kitty")
+        );
+        assert!(cfg.apps["btop"].reload.is_none());
+
+        let back: ThemrConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.apps["kitty"].reload, cfg.apps["kitty"].reload);
+        assert!(back.apps["btop"].reload.is_none());
     }
 
     #[test]
@@ -74,6 +104,7 @@ mod tests {
             AppConfig {
                 theme: None,
                 files: vec!["~/.config/kitty/current-theme.conf".into()],
+                reload: None,
             },
         );
         let text = toml::to_string_pretty(&cfg).unwrap();
