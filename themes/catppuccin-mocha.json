@@ -1,0 +1,21 @@
+{
+  "name": "Catppuccin Mocha",
+  "colors": {
+    "background": "#1e1e2e",
+    "foreground": "#cdd6f4",
+    "surface": "#313244",
+    "overlay": "#45475a",
+    "muted": "#6c7086",
+    "primary": "#89b4fa",
+    "accent": "#f5c2e7",
+    "red": "#f38ba8",
+    "green": "#a6e3a1",
+    "yellow": "#f9e2af",
+    "blue": "#89b4fa",
+    "magenta": "#cba6f7",
+    "cyan": "#94e2d5",
+    "orange": "#fab387",
+    "black": "#11111b",
+    "white": "#cdd6f4"
+  }
+}
