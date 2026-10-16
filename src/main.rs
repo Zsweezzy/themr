@@ -35,6 +35,25 @@ fn main() {
         .application_id("dev.themr.Themr")
         .build();
     app.connect_activate(|app| {
+        // GTK's built-in theme pins `button.color > colorswatch:only-child` to
+        // border-radius: 0 and the active theme never re-rounds it, so every
+        // color swatch renders square next to rounded buttons.
+        let css = gtk::CssProvider::new();
+        css.load_from_data(
+            "button.color > colorswatch:only-child,\n\
+             button.color > colorswatch:only-child > overlay {\n\
+                 border-radius: 50%;\n\
+                 box-shadow: none;\n\
+             }",
+        );
+        if let Some(display) = gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &css,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+
         let win = gtk::ApplicationWindow::builder()
             .application(app)
             .title("themr")
@@ -151,6 +170,10 @@ fn summarize(reports: &[AppReport]) -> String {
         .iter()
         .map(|r| r.files.iter().map(|f| f.replaced).sum::<usize>())
         .sum();
+    let adopted: usize = reports
+        .iter()
+        .map(|r| r.files.iter().map(|f| f.adopted).sum::<usize>())
+        .sum();
     let errors: usize = reports.iter().map(|r| r.errors.len()).sum();
     let warnings: usize = reports
         .iter()
@@ -159,8 +182,13 @@ fn summarize(reports: &[AppReport]) -> String {
     if reports.is_empty() {
         return "no apps configured yet — press 'Add app'".into();
     }
+    if updated == 0 && colors == 0 && adopted == 0 {
+        return format!(
+            "nothing to change in {files} file(s): no {{{{token}}}} markers and no hex matching this theme's palette — terminal says which file"
+        );
+    }
     format!(
-        "applied: {} app(s), {files} file(s), {updated} rewritten, {colors} colors — {warnings} warning(s), {errors} error(s), details in terminal",
+        "applied: {} app(s), {files} file(s), {updated} rewritten, {colors} colors, {adopted} adopted — {warnings} warning(s), {errors} error(s), details in terminal",
         reports.len()
     )
 }
@@ -172,9 +200,22 @@ fn summarize_app(report: &AppReport) -> String {
         .filter(|f| f.status == FileStatus::Updated)
         .count();
     let colors: usize = report.files.iter().map(|f| f.replaced).sum();
+    let adopted: usize = report.files.iter().map(|f| f.adopted).sum();
     let warnings: usize = report.files.iter().map(|f| f.warnings.len()).sum();
+    if updated == 0 && colors == 0 && adopted == 0 {
+        return format!(
+            "{} → '{}': nothing to change (no markers, no palette-matching hex) — terminal says which file",
+            report.app, report.theme
+        );
+    }
+    if colors == 0 && adopted > 0 {
+        return format!(
+            "{} → '{}': {adopted} colors adopted from this theme — press Apply again after switching theme",
+            report.app, report.theme
+        );
+    }
     format!(
-        "{} → '{}': {updated} file(s) rewritten, {colors} colors, {warnings} warning(s)",
+        "{} → '{}': {updated} file(s) rewritten, {colors} colors, {adopted} adopted, {warnings} warning(s)",
         report.app, report.theme
     )
 }
@@ -590,7 +631,7 @@ fn open_add_dialog(win: &gtk::ApplicationWindow) {
                 return;
             }
             set_status(&format!(
-                "added app '{name}' — put {{{{token}}}} markers in its files to start"
+                "added app '{name}' — press Apply: themr adopts any colors already matching the theme"
             ));
             dialog.close();
             rebuild_later(&win);

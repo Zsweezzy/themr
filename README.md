@@ -17,11 +17,13 @@ one GUI.
 
 ## How it works
 
-1. **You put tokens in your configs once.** Any file can contain `{{token}}`, where
-   *token* is a color name from the theme (`{{primary}}`, `{{background}}`, …).
-2. **themr replaces them with hex values** on Apply, and remembers what it wrote for each
+1. **Either read on Apply.** A file that already uses the current theme's exact hex values
+   is *adopted* automatically — the values are left alone and themr starts tracking them
+   (the status line says how many). No markup needed. Any file can also contain
+   `{{token}}`, where *token* is a color name from the theme (`{{primary}}`, `{{background}}`, …).
+2. **themr replaces markers with hex values** on Apply, and remembers what it wrote for each
    file in `~/.config/themr/state.json`.
-3. **Switch theme → Apply →** the old hex values themr wrote are swapped for the new
+3. **Switch theme → Apply →** the hex values themr tracks are swapped for the new
    theme's values. Hex you never put through themr is never touched, so `#000000` you
    meant literally stays put.
 4. **Before the first edit of any file, themr copies it** to `<file>.themr.bak`, once,
@@ -110,24 +112,34 @@ import as-is:
 ```
 
 Any token name works as long as your configs use the same name. The bundled themes share
-this set: `background`, `foreground`, `surface`, `overlay`, `muted`, `primary`, `accent`,
-`red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `orange`, `black`, `white`.
+this set: `background`, `foreground`, `surface`, `overlay`, `muted`, `red`, `green`,
+`yellow`, `blue`, `magenta`, `purple`, `cyan`, `orange`, plus the synonyms `primary`
+(=`blue`), `accent` (=`magenta`), `black` (=`overlay`) and `white` (=`foreground`).
+Adoption prefers the palette name over a synonym, so a config follows `foreground` and
+never `white`.
 
 `#rgb`, `#rrggbb` and `#rrggbbaa` are accepted and normalized to lowercase.
 
 ## Known limits
 
-- themr rewrites the hex it wrote earlier, so a color you set by hand in a tracked file is
+- themr rewrites the hex it tracks, so a color you set by hand in a tracked file is
   left alone, but a *value* that two different tokens share can't be told apart — themr
   picks one and says so in the terminal.
-- A config that never had tokens or tracked values is reported as untracked instead of
-  being guessed at. Add one `{{token}}` line and it takes over.
+- Adoption only recognises values that exactly match the theme, case-insensitively. A
+  file whose palette is a *different* variant of the same theme (e.g. Tokyo Night Storm
+  hexes against a Tokyo Night Moon theme) adopts only the few colors that coincide; the
+  rest need `{{token}}` markers to join in.
+- Colors written as function calls rather than hex (QML `Qt.rgba(…)`, CSS `rgba(…)`) are
+  never touched. Give those a token by hand if the app accepts one.
 - Plus and minus (`#000000` vs `#000000ff`) are treated as different colors, on purpose.
+- Applying only rewrites files. Reloading the app is up to the app: some pick it up
+  automatically (Quickshell hot-reloads a saved config), others need a restart or a
+  signal.
 
 ## Development
 
 ```bash
-cargo test      # 19 unit tests over parsing, rewriting, backups, per-app overrides
+cargo test      # 23 unit tests over parsing, rewriting, adoption, backups, per-app overrides
 cargo clippy --all-targets -- -D warnings
 ```
 

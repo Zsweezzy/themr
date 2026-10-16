@@ -18,6 +18,8 @@ pub struct FileReport {
     pub path: PathBuf,
     pub status: FileStatus,
     pub replaced: usize,
+    /// colors found already equal to this theme's palette and now tracked
+    pub adopted: usize,
     pub warnings: Vec<String>,
     /// tokens confirmed in this file and their new values, for the tracking state
     pub written: BTreeMap<String, String>,
@@ -28,6 +30,10 @@ impl FileReport {
         let name = self.path.display();
         match self.status {
             FileStatus::MissingFile => format!("{name}: not found, skipped"),
+            FileStatus::Unchanged if self.adopted > 0 => format!(
+                "{name}: {} colors adopted from this theme's palette (tracked, values unchanged)",
+                self.adopted
+            ),
             FileStatus::Unchanged => format!("{name}: already up to date"),
             FileStatus::Updated => format!("{name}: {} colors rewritten", self.replaced),
         }
@@ -114,11 +120,63 @@ pub struct RenderResult {
     pub text: String,
     pub written: BTreeMap<String, String>,
     pub replaced: usize,
+    pub adopted: usize,
     pub warnings: Vec<String>,
 }
 
+/// Every whole `#rgb`/`#rrggbb`/`#rrggbbaa` literal in the text, lowercased.
+fn scan_hexes(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '#' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < chars.len() && is_hex(chars[j]) {
+            j += 1;
+        }
+        if matches!(j - i - 1, 3 | 6 | 8) {
+            found.push(chars[i..j].iter().collect::<String>().to_lowercase());
+        }
+        i = j;
+    }
+    found
+}
+
+/// Names that are only synonyms in the bundled themes. When a value has more
+/// than one of them, the palette name is adopted instead, so a config follows
+/// `foreground`/`blue`/`magenta`/`overlay` and not a synonym.
+const ALIASES: [&str; 4] = ["primary", "accent", "black", "white"];
+
+/// A file that already uses this theme's exact colors needs no markers: adopt
+/// those values so the next Apply can move the file to another theme.
+fn adopt_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
+    let mut by_value: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (token, value) in &theme.colors {
+        by_value.entry(value.as_str()).or_default().push(token);
+    }
+    let mut adopted = BTreeMap::new();
+    for hex in scan_hexes(text) {
+        let Some(tokens) = by_value.get(hex.as_str()) else {
+            continue;
+        };
+        let pick = tokens
+            .iter()
+            .find(|t| !ALIASES.contains(&**t))
+            .or(tokens.first());
+        if let Some(token) = pick {
+            adopted.insert((*token).to_string(), hex);
+        }
+    }
+    adopted
+}
+
 /// Rewrite every color themr tracks in this file to the theme's value.
-/// `previous` is what themr wrote last time (token -> hex).
+/// `previous` is what themr wrote last time (token -> hex). On the first look
+/// at a file, palette-matching hex values are adopted instead of rewritten.
 pub fn render(text: &str, theme: &Theme, previous: &BTreeMap<String, String>) -> RenderResult {
     let mut warnings = Vec::new();
     let (mut out, mut written, unknown, mut replaced) = replace_markers(text, theme);
@@ -127,6 +185,22 @@ pub fn render(text: &str, theme: &Theme, previous: &BTreeMap<String, String>) ->
             "token {{{{{key}}}}} is not in this theme, left as is"
         ));
     }
+
+    let adopted = if previous.is_empty() {
+        adopt_hexes(&out, theme)
+    } else {
+        BTreeMap::new()
+    };
+    for (token, value) in &adopted {
+        written
+            .entry(token.clone())
+            .or_insert_with(|| value.clone());
+    }
+    let previous = if previous.is_empty() {
+        &adopted
+    } else {
+        previous
+    };
 
     // shortcut: same hex used for two tokens can only resolve to one new value; the first wins.
     let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
@@ -164,13 +238,14 @@ pub fn render(text: &str, theme: &Theme, previous: &BTreeMap<String, String>) ->
     }
 
     if written.is_empty() && previous.is_empty() && out == text {
-        warnings.push("no colors tracked yet: put {{primary}} and friends in this file, or point themr at a theme file".into());
+        warnings.push("nothing themeable here: no {{token}} markers, and no hex value matching this theme's palette to adopt".into());
     }
 
     RenderResult {
         text: out,
         written,
         replaced,
+        adopted: adopted.len(),
         warnings,
     }
 }
@@ -188,6 +263,7 @@ pub fn apply_file(
                 path: path.to_path_buf(),
                 status: FileStatus::MissingFile,
                 replaced: 0,
+                adopted: 0,
                 warnings: vec![],
                 written: BTreeMap::new(),
             });
@@ -213,6 +289,7 @@ pub fn apply_file(
         path: path.to_path_buf(),
         status,
         replaced: result.replaced,
+        adopted: result.adopted,
         warnings: result.warnings,
         written: result.written,
     })
@@ -292,7 +369,7 @@ mod tests {
         let r1 = apply_file(&path, &theme(), &BTreeMap::new()).unwrap();
         assert_eq!(r1.status, FileStatus::Unchanged);
         assert!(!backup_path(&path).exists());
-        assert!(r1.warnings.iter().any(|w| w.contains("no colors tracked")));
+        assert!(r1.warnings.iter().any(|w| w.contains("nothing themeable")));
 
         // after the file holds a tracked value, a theme change rewrites it and backs up
         let mut prev = BTreeMap::new();
@@ -333,5 +410,58 @@ mod tests {
         assert_eq!(first.status, FileStatus::Updated);
         let second = apply_file(&path, &theme(), &prev).unwrap();
         assert_eq!(second.status, FileStatus::Unchanged);
+    }
+
+    #[test]
+    fn plain_hex_matching_the_theme_is_adopted() {
+        let r = render("bg #111111\nfg #eeeeee\n", &theme(), &BTreeMap::new());
+        assert_eq!(r.text, "bg #111111\nfg #eeeeee\n");
+        assert_eq!(r.adopted, 2);
+        assert_eq!(r.written["bg"], "#111111");
+        assert_eq!(r.written["fg"], "#eeeeee");
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn adopt_is_case_insensitive_and_ignores_longer_hex() {
+        let r = render("a #111111FF\nb #111111\n", &theme(), &BTreeMap::new());
+        assert_eq!(r.adopted, 1);
+        assert_eq!(r.text, "a #111111FF\nb #111111\n");
+    }
+
+    #[test]
+    fn shared_value_adopts_the_palette_name_not_the_alias() {
+        // blue and primary hold the same color: the config must follow `blue`
+        let t = parse_theme(
+            r##"{"colors":{"blue":"#111111","primary":"#111111"}}"##,
+            "alias",
+        )
+        .unwrap();
+        let r = render("x #111111\n", &t, &BTreeMap::new());
+        assert_eq!(r.adopted, 1);
+        assert_eq!(r.written.keys().collect::<Vec<_>>(), vec!["blue"]);
+        assert_eq!(r.text, "x #111111\n");
+    }
+
+    #[test]
+    fn adopted_colors_are_rewritten_on_the_next_apply() {
+        let path = tmp("adopt-then-switch");
+        fs::write(&path, "bg #111111\n").unwrap();
+
+        // first apply adopts, file untouched, no backup
+        let r1 = apply_file(&path, &theme(), &BTreeMap::new()).unwrap();
+        assert_eq!(r1.status, FileStatus::Unchanged);
+        assert_eq!(r1.adopted, 1);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "bg #111111\n");
+
+        // switching theme now rewrites the adopted value
+        let other = parse_theme(r##"{"colors":{"bg":"#222222"}}"##, "other").unwrap();
+        let r2 = apply_file(&path, &other, &r1.written).unwrap();
+        assert_eq!(r2.status, FileStatus::Updated);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "bg #222222\n");
+        assert_eq!(
+            fs::read_to_string(backup_path(&path)).unwrap(),
+            "bg #111111\n"
+        );
     }
 }
