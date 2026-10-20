@@ -152,6 +152,8 @@ otherwise wait forever for its daemon can never hang an Apply).
 | hyprlock / swaylock | `hyprlock.conf` / `swaylock/config` | next lock |
 | wlogout | `style.css` | next launch |
 | qt | `~/.config/Trolltech.conf` | next launch |
+| kde | `~/.config/kdeglobals` | restart the app |
+| konsole | `~/.local/share/konsole/*.colorscheme` | next tab |
 | Xresources | `~/.Xresources` | `xrdb -merge ~/.Xresources` |
 | btop / cava | `btop.conf` / `cava/config` | next launch |
 | starship | `starship.toml` | next prompt |
@@ -204,7 +206,10 @@ never `white`.
   hexes against a Tokyo Night Moon theme) adopts only the few colors that coincide; the
   rest need `{{token}}` markers to join in.
 - themr rewrites the colour syntaxes the real configs use: `#rgb`/`#rrggbb`, CSS
-  `rgb(r, g, b)`/`rgba(r, g, b, a)`, and hypr's `rgba(RRGGBBaa)`/`0xAARRGGBB`. Alpha is
+  `rgb(r, g, b)`/`rgba(r, g, b, a)`, hypr's `rgba(RRGGBBaa)`/`0xAARRGGBB`, and the bare
+  decimal `R,G,B` triples KDE and Konsole write. A triple needs exactly three 0-255
+  components, so `WindowGeometry=100,50,800,600`, `34,36,54,100`, `1.5,2,3` and
+  `translate3d(0,0,0)` are never mistaken for a colour. Alpha is
   kept as-is. A `#rrggbbaa` in a *config* is treated as a colour of its own and is not
   touched by a `#rrggbb` binding.
 - Plus and minus (`#000000` vs `#000000ff`) are treated as different colors, on purpose.
@@ -212,10 +217,18 @@ never `white`.
   hundreds of distinct colours; themr maps colours onto a ~20-token palette, so pointing
   it at one collapses every accent onto the background colour and the UI goes flat. If
   your `gtk.css` is a small hand-written override it is fine to add by hand.
-- KDE configs are not supported: `kdeglobals`, `~/.local/share/color-schemes/*.colors`
-  and Konsole `.colorscheme` files write colours as decimal `R,G,B` triples, not hex, and
-  themr only rewrites `#hex`, `rgb()`/`rgba()` and hypr's `rgba()`/`0x`. `Trolltech.conf`
-  (Qt palette) *is* hex and has a preset.
+- KDE and Konsole are themed through their *keys*, because an `R,G,B` triple says nothing
+  about what it means: `BackgroundNormal`, `ForegroundLink`, and Konsole's
+  `[Background]`/`[Color1]` sections map onto palette tokens, so a KDE app follows the
+  theme even when its current scheme shares no colour with it. Only `[Colors:Selection]`
+  and `[Colors:Header]`/`[Colors:Complementary]` are treated differently, since their
+  backgrounds are the highlight and the raised surface. An 18-token palette is coarser
+  than a KDE scheme, so the six background shades collapse into `background`/`surface`.
+  `~/.local/share/color-schemes/*.colors` files are *not* in the preset: they are the
+  source `plasma-apply-colorscheme` copies *over* `kdeglobals`, so theming them would
+  fight the app, and a scheme you are not using would be recoloured too. Konsole's
+  wildcard themes every scheme in that directory; list one file instead if you want to
+  keep another scheme as it is.
 - Applying rewrites files, then runs the app's `reload` command if it has one, so the
   change is visible without a manual restart. Kitty needs `pkill -SIGUSR1 -x kitty`,
   waybar `pkill -SIGUSR2 -x waybar`, Hyprland `hyprctl reload`; alacritty, wezterm and niri
@@ -227,7 +240,7 @@ never `white`.
 ## Development
 
 ```bash
-cargo test      # 38 unit tests over parsing, rewriting, adoption, key lines, reloads, presets, backups, per-app overrides
+cargo test      # 48 unit tests over parsing, rewriting, adoption, key lines, reloads, presets, backups, per-app overrides
 cargo clippy --all-targets -- -D warnings
 ```
 

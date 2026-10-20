@@ -199,6 +199,19 @@ const PRESETS: &[Preset] = &[
         files: &["~/.config/Trolltech.conf"],
         reload: None,
     },
+    // The applied palette KDE apps read; `plasma-apply-colorscheme` would
+    // overwrite it again from the scheme file, so theme the scheme itself too
+    // if you switch palettes that way. Reloading a KDE app means restarting it.
+    Preset {
+        app: "kde",
+        files: &["~/.config/kdeglobals"],
+        reload: None,
+    },
+    Preset {
+        app: "konsole",
+        files: &["~/.local/share/konsole/*.colorscheme"],
+        reload: None,
+    },
     Preset {
         app: "xresources",
         files: &["~/.Xresources"],
@@ -302,12 +315,50 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// A preset's files that exist under `home`, in preset order.
+/// Expand a single `*` wildcard in the last path component of `path`, with
+/// `home` resolving `~/`. A path without a wildcard is returned as is. Sorted,
+/// so an Apply touches files in a stable order.
+fn glob_paths(path: &str, home: &Path) -> Vec<PathBuf> {
+    let rel = path.strip_prefix("~/").unwrap_or(path);
+    let full = home.join(rel);
+    let Some(name) = full.file_name().and_then(|n| n.to_str()) else {
+        return vec![full];
+    };
+    let Some((prefix, suffix)) = name.split_once('*') else {
+        return vec![full];
+    };
+    if suffix.contains('*') {
+        return vec![full]; // shortcut: one wildcard per path, enough for scheme dirs
+    }
+    let Ok(entries) = fs::read_dir(full.parent().unwrap_or(home)) else {
+        return vec![];
+    };
+    let mut out: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            let Some(n) = p.file_name().and_then(|n| n.to_str()) else {
+                return false;
+            };
+            n.len() >= prefix.len() + suffix.len() && n.starts_with(prefix) && n.ends_with(suffix)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// A preset's files that exist under `home`, in preset order. A wildcard is
+/// kept as written when it matches something, so new scheme files are picked
+/// up without re-detecting.
 fn existing_files(preset: &Preset, home: &Path) -> Vec<String> {
     preset
         .files
         .iter()
         .filter(|rel| {
+            if rel.contains('*') {
+                return !glob_paths(rel, home).is_empty();
+            }
             let rel_path = rel.strip_prefix("~/").unwrap_or(rel);
             home.join(rel_path).exists()
         })
@@ -494,23 +545,30 @@ pub fn apply_app(
         report.errors.push(format!("unknown app '{name}'"));
         return report;
     };
+    let home = home_dir();
     for file in &app.files {
-        let path = expand(file);
-        let previous = state
-            .files
-            .get(path.to_string_lossy().as_ref())
-            .cloned()
-            .unwrap_or_default();
-        match apply_file(&path, theme, &previous) {
-            Ok(fr) => {
-                if fr.status != FileStatus::MissingFile {
-                    let key = path.to_string_lossy().into_owned();
-                    let entry = state.files.entry(key).or_default();
-                    entry.extend(fr.written.clone());
+        let paths = if file.contains('*') {
+            glob_paths(file, &home)
+        } else {
+            vec![expand(file)]
+        };
+        for path in paths {
+            let previous = state
+                .files
+                .get(path.to_string_lossy().as_ref())
+                .cloned()
+                .unwrap_or_default();
+            match apply_file(&path, theme, &previous) {
+                Ok(fr) => {
+                    if fr.status != FileStatus::MissingFile {
+                        let key = path.to_string_lossy().into_owned();
+                        let entry = state.files.entry(key).or_default();
+                        entry.extend(fr.written.clone());
+                    }
+                    report.files.push(fr);
                 }
-                report.files.push(fr);
+                Err(e) => report.errors.push(e),
             }
-            Err(e) => report.errors.push(e),
         }
     }
     // Only nudge the app when a file actually changed, so a repeat Apply is a no-op.
@@ -615,6 +673,36 @@ mod tests {
         );
         // the preset table carries a broad set of apps
         assert!(PRESETS.len() >= 30, "expected a broad preset table");
+    }
+
+    #[test]
+    fn wildcard_files_expand_to_matching_files_and_seed_once() {
+        let home = tmpdir("glob");
+        fs::create_dir_all(home.join(".local/share/konsole")).unwrap();
+        fs::write(home.join(".local/share/konsole/A.colorscheme"), "[Color1]\nColor=1,1,1\n")
+            .unwrap();
+        fs::write(home.join(".local/share/konsole/B.colorscheme"), "[Color1]\nColor=2,2,2\n")
+            .unwrap();
+        fs::write(home.join(".local/share/konsole/notes.txt"), "x\n").unwrap();
+
+        // the config keeps the wildcard, so new scheme files are picked up later
+        let apps = seed_apps(&home);
+        assert_eq!(
+            apps["konsole"].files,
+            vec!["~/.local/share/konsole/*.colorscheme".to_string()]
+        );
+
+        let all = glob_paths("~/.local/share/konsole/*.colorscheme", &home);
+        let names: Vec<String> = all
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["A.colorscheme", "B.colorscheme"]);
+
+        // no match is not an error and seeds nothing
+        assert!(glob_paths("~/.local/share/konsole/*.nope", &home).is_empty());
+        let empty = tmpdir("glob-empty");
+        assert!(!seed_apps(&empty).contains_key("konsole"));
     }
 
     #[test]
@@ -740,6 +828,42 @@ mod tests {
             "bg {{background}}\nfg #000000\n"
         );
         assert!(!state.files.contains_key(file.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn apply_app_writes_every_file_a_wildcard_matches() {
+        let dir = tmpdir("apply-glob");
+        fs::write(dir.join("A.colorscheme"), "[Background]\nColor=1,1,1\n").unwrap();
+        fs::write(dir.join("B.colorscheme"), "[Background]\nColor=2,2,2\n").unwrap();
+        fs::write(dir.join("keep.txt"), "untouched\n").unwrap();
+
+        let mut cfg = ThemrConfig {
+            theme: "a".into(),
+            apps: BTreeMap::new(),
+        };
+        cfg.apps.insert(
+            "konsole".into(),
+            AppConfig {
+                theme: None,
+                files: vec![format!("{}/*.colorscheme", dir.display())],
+                reload: None,
+            },
+        );
+        let mut themes = BTreeMap::new();
+        themes.insert("a".into(), theme("a", "#222222"));
+        let mut state = State::default();
+        let report = apply_all(&cfg, &themes, &mut state);
+
+        assert!(report[0].errors.is_empty(), "{:?}", report[0].errors);
+        assert_eq!(report[0].files.len(), 2, "both schemes, not the .txt");
+        for name in ["A.colorscheme", "B.colorscheme"] {
+            assert_eq!(
+                fs::read_to_string(dir.join(name)).unwrap(),
+                "[Background]\nColor=34,34,34\n"
+            );
+        }
+        assert_eq!(fs::read_to_string(dir.join("keep.txt")).unwrap(), "untouched\n");
+        assert_eq!(state.files.len(), 2, "one state entry per matched file");
     }
 
     #[test]

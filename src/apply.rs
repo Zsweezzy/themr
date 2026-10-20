@@ -178,6 +178,69 @@ fn css_lit(text: &str, i: usize) -> Option<ColorLit> {
 }
 
 /// Every colour literal in `text`, in order.
+/// KDE decimal triple `R,G,B`, 0-255 each, with no function wrapper: the form
+/// used by `kdeglobals`, `color-schemes/*.colors` and Konsole `.colorscheme`.
+/// Exactly three components, so geometry like `100,50,800,600` or `100,50,800`
+/// never matches; parentheses are excluded so CSS `translate3d(0,0,0)` and
+/// `rgb(...)` arguments are left alone.
+fn triple_lit(text: &str, i: usize) -> Option<ColorLit> {
+    let b = text.as_bytes();
+    let prev = i.checked_sub(1).map(|p| b[p]);
+    if let Some(p) = prev
+        && (p.is_ascii_alphanumeric()
+            || matches!(p, b'.' | b'_' | b'-' | b'+' | b'%' | b':' | b',' | b'('))
+    {
+        return None;
+    }
+    let mut comps = Vec::new();
+    let mut k = i;
+    for n in 0..3 {
+        if n > 0 {
+            let mut s = k;
+            while s < b.len() && b[s] == b' ' {
+                s += 1;
+            }
+            if s >= b.len() || b[s] != b',' {
+                return None;
+            }
+            k = s + 1;
+            while k < b.len() && b[k] == b' ' {
+                k += 1;
+            }
+        }
+        let start = k;
+        while k < b.len() && b[k].is_ascii_digit() && k - start < 3 {
+            k += 1;
+        }
+        if k == start {
+            return None;
+        }
+        comps.push((start, k, text[start..k].parse::<u8>().ok()?));
+    }
+    // a longer list, a unit, a float or a percentage continues right after the
+    // digits; a closing paren may be spaced out
+    if let Some(c) = b.get(k)
+        && (c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-' | b'+' | b'%' | b','))
+    {
+        return None;
+    }
+    let mut p = k;
+    while p < b.len() && b[p] == b' ' {
+        p += 1;
+    }
+    if b.get(p) == Some(&b')') {
+        return None;
+    }
+    Some(ColorLit {
+        start: i,
+        end: k,
+        rgb: format!("#{:02x}{:02x}{:02x}", comps[0].2, comps[1].2, comps[2].2),
+        digits: comps.into_iter().map(|c| (c.0, c.1)).collect(),
+        decimal: true,
+        upper: false,
+    })
+}
+
 fn scan_lits(text: &str) -> Vec<ColorLit> {
     let b = text.as_bytes();
     let mut out = Vec::new();
@@ -190,6 +253,8 @@ fn scan_lits(text: &str) -> Vec<ColorLit> {
             hex_lit(text, i)
         } else if c == b'r' && text[i..].starts_with("rgb") {
             css_lit(text, i)
+        } else if c.is_ascii_digit() {
+            triple_lit(text, i)
         } else {
             None
         };
@@ -385,8 +450,58 @@ const KEY_ALIASES: [(&str, &str); 48] = [
     ("handle-color", "surface"),
 ];
 
-/// `main_bg` for `theme[main_bg]`, and any configured alias -> palette token.
-fn resolve_key<'a>(key: &'a str, theme: &'a Theme) -> Option<&'a str> {
+/// KDE colour-scheme keys (`kdeglobals`, `color-schemes/*.colors`). Unlike
+/// btop, the key names are semantic, so a KDE file follows the palette even
+/// when its current values are not in it. The selection section inverts the
+/// usual pairing: its background is the highlight and its text sits on it.
+fn kde_token(key: &str, section: &str) -> Option<&'static str> {
+    let selection = section == "Colors:Selection";
+    let headerish = section == "Colors:Header" || section == "Colors:Complementary";
+    Some(match key {
+        "BackgroundNormal" if selection => "primary",
+        "BackgroundAlternate" if selection => "primary",
+        "BackgroundNormal" if headerish => "surface",
+        "BackgroundNormal" => "background",
+        "BackgroundAlternate" => "surface",
+        "ForegroundNormal" if selection => "background",
+        "ForegroundNormal" => "foreground",
+        "ForegroundInactive" => "muted",
+        "ForegroundLink" | "ForegroundActive" | "ForegroundVisited" => "blue",
+        "ForegroundNegative" => "red",
+        "ForegroundNeutral" => "yellow",
+        "ForegroundPositive" => "green",
+        _ => return None,
+    })
+}
+
+/// Konsole `.colorscheme` sections. Each holds one `Color=` triple; the scheme
+/// has no brighter variants of a hue to map to, so the intense sections take
+/// the same token as their base.
+fn konsole_token(section: &str) -> Option<&'static str> {
+    Some(match section {
+        "Background" | "BackgroundFaint" => "background",
+        "BackgroundIntense" => "surface",
+        "Foreground" | "ForegroundIntense" => "foreground",
+        "ForegroundFaint" => "muted",
+        "Color0" | "Color0Intense" | "Color0Faint" => "black",
+        "Color1" | "Color1Intense" | "Color1Faint" => "red",
+        "Color2" | "Color2Intense" | "Color2Faint" => "green",
+        "Color3" | "Color3Intense" | "Color3Faint" => "yellow",
+        "Color4" | "Color4Intense" | "Color4Faint" => "blue",
+        "Color5" | "Color5Intense" | "Color5Faint" => "magenta",
+        "Color6" | "Color6Intense" | "Color6Faint" => "cyan",
+        "Color7" | "Color7Intense" | "Color7Faint" => "white",
+        _ => return None,
+    })
+}
+
+/// The `[section]` a line opens, if it is a section header.
+fn section_of(line: &str) -> Option<&str> {
+    line.trim().strip_prefix('[')?.strip_suffix(']')
+}
+
+/// `main_bg` for `theme[main_bg]`, any configured alias, or a KDE colour key.
+fn resolve_key<'a>(key: &'a str, theme: &'a Theme, section: &str) -> Option<&'a str> {
     let bare = key
         .strip_prefix("theme[")
         .and_then(|k| k.strip_suffix(']'))
@@ -394,10 +509,25 @@ fn resolve_key<'a>(key: &'a str, theme: &'a Theme) -> Option<&'a str> {
     if theme.colors.contains_key(bare) {
         return Some(bare);
     }
-    KEY_ALIASES
+    if let Some((_, token)) = KEY_ALIASES
         .iter()
         .find(|(alias, token)| *alias == bare && theme.colors.contains_key(*token))
-        .map(|(_, token)| *token)
+    {
+        return Some(token);
+    }
+    if section.starts_with("Colors:")
+        && let Some(token) = kde_token(bare, section)
+        && theme.colors.contains_key(token)
+    {
+        return Some(token);
+    }
+    if bare == "Color"
+        && let Some(token) = konsole_token(section)
+        && theme.colors.contains_key(token)
+    {
+        return Some(token);
+    }
+    None
 }
 
 /// A line that names a color by key (`background #222436`, `foreground = "#c8d3f5"`)
@@ -407,7 +537,11 @@ fn resolve_key<'a>(key: &'a str, theme: &'a Theme) -> Option<&'a str> {
 /// `background`), so editing the token never reaches the line the user means.
 fn key_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
+    let mut section = "";
     for line in text.lines() {
+        if let Some(s) = section_of(line) {
+            section = s;
+        }
         let line = line.trim_start();
         if line.starts_with('#')
             || line.starts_with("//")
@@ -419,7 +553,7 @@ fn key_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
         let end = line
             .find(|c: char| c == '=' || c == ':' || c.is_whitespace())
             .unwrap_or(line.len());
-        let Some(token) = resolve_key(&line[..end], theme) else {
+        let Some(token) = resolve_key(&line[..end], theme, section) else {
             continue;
         };
         // the first colour on the line is the one it means, alpha or not
@@ -433,7 +567,7 @@ fn key_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
 /// If `line` names a colour by key (`theme[main_bg]=`, `text-color:`), rewrite
 /// that line's colour to the theme's value and report the token it belongs to.
 /// Syntax and any alpha are kept.
-fn rewrite_key_line(line: &str, theme: &Theme) -> (String, Option<(String, String)>) {
+fn rewrite_key_line(line: &str, theme: &Theme, section: &str) -> (String, Option<(String, String)>) {
     let trimmed = line.trim_start();
     let lead = line.len() - trimmed.len();
     if trimmed.starts_with('#')
@@ -446,7 +580,7 @@ fn rewrite_key_line(line: &str, theme: &Theme) -> (String, Option<(String, Strin
     let end = trimmed
         .find(|c: char| c == '=' || c == ':' || c.is_whitespace())
         .unwrap_or(trimmed.len());
-    let Some(token) = resolve_key(&trimmed[..end], theme) else {
+    let Some(token) = resolve_key(&trimmed[..end], theme, section) else {
         return (line.to_string(), None);
     };
     let body = &trimmed[end..];
@@ -473,13 +607,17 @@ fn apply_key_lines(text: &str, theme: &Theme) -> (String, BTreeMap<String, Strin
     let mut out = String::with_capacity(text.len());
     let mut written = BTreeMap::new();
     let mut hits = 0;
+    let mut section = "";
     let mut rest = text;
     while !rest.is_empty() {
         let (line, tail) = match rest.find('\n') {
             Some(i) => (&rest[..i + 1], &rest[i + 1..]),
             None => (rest, ""),
         };
-        let (new_line, bound) = rewrite_key_line(line, theme);
+        if let Some(s) = section_of(line) {
+            section = s;
+        }
+        let (new_line, bound) = rewrite_key_line(line, theme, section);
         if let Some((token, value)) = bound {
             if new_line != line {
                 hits += 1;
@@ -918,4 +1056,104 @@ mod tests {
         assert_eq!(r2.text, r1.text, "second apply must be a no-op");
         assert_eq!(r2.replaced, 0);
     }
+
+    #[test]
+    fn konsole_scheme_sections_follow_the_palette() {
+        let t = parse_theme(
+            r##"{"colors":{"background":"#1e2030","foreground":"#c8d3f5","black":"#444a73","red":"#ff757f","blue":"#82aaff","white":"#a9b8e8"}}"##,
+            "konsole",
+        )
+        .unwrap();
+        let text = "[Background]\nColor=1,1,1\n[Foreground]\nColor=2,2,2\n[Color0]\nColor=3,3,3\n[Color0Intense]\nColor=4,4,4\n[Color1]\nColor=5,5,5\n[Color4]\nColor=6,6,6\n[Color7]\nColor=7,7,7\n";
+        let r = render(text, &t, &BTreeMap::new());
+        assert_eq!(
+            r.text,
+            "[Background]\nColor=30,32,48\n[Foreground]\nColor=200,211,245\n[Color0]\nColor=68,74,115\n[Color0Intense]\nColor=68,74,115\n[Color1]\nColor=255,117,127\n[Color4]\nColor=130,170,255\n[Color7]\nColor=169,184,232\n"
+        );
+    }
+
+    #[test]
+    fn kde_scheme_keys_follow_the_palette_per_section() {
+        let t = parse_theme(
+            r##"{"colors":{"background":"#1e2030","surface":"#2f334d","foreground":"#c8d3f5","muted":"#828bb8","blue":"#82aaff","primary":"#82aaff","red":"#ff757f","yellow":"#ffc777","green":"#4fd6be","cyan":"#86e1fc"}}"##,
+            "kde",
+        )
+        .unwrap();
+        let text = "[General]\nBackgroundNormal=9,9,9\n[Colors:Window]\nBackgroundNormal=1,1,1\nBackgroundAlternate=2,2,2\nForegroundNormal=3,3,3\nForegroundLink=4,4,4\nForegroundNegative=5,5,5\n[Colors:Header]\nBackgroundNormal=1,1,1\n[Colors:Selection]\nBackgroundNormal=6,6,6\nForegroundNormal=3,3,3\n";
+        let r = render(text, &t, &BTreeMap::new());
+        assert_eq!(
+            r.text,
+            "[General]\nBackgroundNormal=9,9,9\n[Colors:Window]\nBackgroundNormal=30,32,48\nBackgroundAlternate=47,51,77\nForegroundNormal=200,211,245\nForegroundLink=130,170,255\nForegroundNegative=255,117,127\n[Colors:Header]\nBackgroundNormal=47,51,77\n[Colors:Selection]\nBackgroundNormal=130,170,255\nForegroundNormal=30,32,48\n"
+        );
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn kde_decimal_triple_is_adopted_then_rewritten() {
+        // kdeglobals, color-schemes/*.colors and Konsole .colorscheme syntax
+        let path = tmp("kde-triple");
+        fs::write(
+            &path,
+            "[Colors:Window]\nBackgroundNormal=17,17,17\nForegroundNormal=238,238,238\n",
+        )
+        .unwrap();
+
+        let r1 = apply_file(&path, &theme(), &BTreeMap::new()).unwrap();
+        assert_eq!(r1.status, FileStatus::Unchanged);
+        assert_eq!(r1.adopted, 2);
+
+        let other = parse_theme(
+            r##"{"colors":{"bg":"#222436","fg":"#c8d3f5"}}"##,
+            "other",
+        )
+        .unwrap();
+        let r2 = apply_file(&path, &other, &r1.written).unwrap();
+        assert_eq!(r2.status, FileStatus::Updated);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[Colors:Window]\nBackgroundNormal=34,36,54\nForegroundNormal=200,211,245\n"
+        );
+    }
+
+    #[test]
+    fn triple_keeps_its_separator_spacing() {
+        let t = parse_theme(r##"{"colors":{"bg":"#222436"}}"##, "spaced").unwrap();
+        let mut prev = BTreeMap::new();
+        prev.insert("bg".to_string(), "#111111".to_string());
+        let r = render("Color=17, 17, 17\n", &t, &prev);
+        assert_eq!(r.text, "Color=34, 36, 54\n");
+        assert_eq!(r.replaced, 1);
+    }
+
+    #[test]
+    fn longer_number_lists_are_not_colours() {
+        let mut prev = BTreeMap::new();
+        prev.insert("bg".to_string(), "#222436".to_string());
+        let text = "WindowGeometry=34,36,54,100\nA=34,36,54.5\nB=8734,36,54\nC=34,36\n";
+        let r = render(text, &theme(), &prev);
+        assert_eq!(r.text, text);
+        assert_eq!(r.replaced, 0);
+    }
+
+    #[test]
+    fn function_arguments_are_not_bare_triples() {
+        let mut prev = BTreeMap::new();
+        prev.insert("bg".to_string(), "#222436".to_string());
+        let text = "transform: translate3d(34,36,54);\nE=d3(34, 36, 54)\nF=g(34,36,54 )\n";
+        let r = render(text, &theme(), &prev);
+        assert_eq!(r.text, text);
+        assert_eq!(r.replaced, 0);
+    }
+
+    #[test]
+    fn css_rgb_is_one_literal_not_a_triple_plus_noise() {
+        let lits = scan_lits("color: rgb(1,2,3);");
+        assert_eq!(lits.len(), 1);
+        assert_eq!(lits[0].rgb, "#010203");
+        assert!(lits[0].decimal);
+        assert_eq!(scan_lits("x 1,2,3 y").len(), 1);
+        assert!(scan_lits("x 1,2 y").is_empty());
+    }
 }
+
+
