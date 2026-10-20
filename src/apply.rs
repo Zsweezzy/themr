@@ -500,6 +500,18 @@ fn section_of(line: &str) -> Option<&str> {
     line.trim().strip_prefix('[')?.strip_suffix(']')
 }
 
+/// The state selector a rofi rasi line opens (`element selected {`), if any.
+/// Rasi scopes colours by selector, not by `[section]`, so the rewriter needs
+/// it to tell `element selected`'s highlight from the window background.
+fn block_of(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with(';') {
+        return None;
+    }
+    let sel = trimmed.strip_suffix('{')?.trim();
+    (!sel.is_empty()).then_some(sel)
+}
+
 /// `main_bg` for `theme[main_bg]`, any configured alias, or a KDE colour key.
 fn resolve_key<'a>(key: &'a str, theme: &'a Theme, section: &str) -> Option<&'a str> {
     let bare = key
@@ -508,6 +520,19 @@ fn resolve_key<'a>(key: &'a str, theme: &'a Theme, section: &str) -> Option<&'a 
         .unwrap_or(key);
     if theme.colors.contains_key(bare) {
         return Some(bare);
+    }
+    // rofi rasi: inside a `… selected` state block (element selected,
+    // button selected, element selected.active, …) background-color is the
+    // selection highlight, not the window background
+    // shortcut: the urgent/active variants also get surface rather than
+    // red/blue; split by suffix when a theme needs them distinct
+    if bare == "background-color"
+        && section
+            .split(|c: char| c == '.' || c.is_whitespace())
+            .any(|w| w == "selected")
+        && theme.colors.contains_key("surface")
+    {
+        return Some("surface");
     }
     if let Some((_, token)) = KEY_ALIASES
         .iter()
@@ -540,6 +565,8 @@ fn key_hexes(text: &str, theme: &Theme) -> BTreeMap<String, String> {
     let mut section = "";
     for line in text.lines() {
         if let Some(s) = section_of(line) {
+            section = s;
+        } else if let Some(s) = block_of(line) {
             section = s;
         }
         let line = line.trim_start();
@@ -615,6 +642,8 @@ fn apply_key_lines(text: &str, theme: &Theme) -> (String, BTreeMap<String, Strin
             None => (rest, ""),
         };
         if let Some(s) = section_of(line) {
+            section = s;
+        } else if let Some(s) = block_of(line) {
             section = s;
         }
         let (new_line, bound) = rewrite_key_line(line, theme, section);
@@ -1029,6 +1058,26 @@ mod tests {
         let r = render("text-color: #ff0000;\n", &t, &BTreeMap::new());
         assert_eq!(r.text, "text-color: #eeeeee;\n");
         assert_eq!(r.replaced, 1);
+    }
+
+    #[test]
+    fn rofi_selected_block_keeps_the_highlight() {
+        // regression: the key rewriter treated rasi's `element selected` block
+        // like any other background-color line and set the selection highlight
+        // to the window background, making the selected line invisible
+        let t = parse_theme(
+            r##"{"colors":{"background":"#1e2030","surface":"#2f334d","foreground":"#c8d3f5"}}"##,
+            "k",
+        )
+        .unwrap();
+        let text = "element selected {\n    background-color: #000000;\n}\nwindow {\n    background-color: #000000;\n}\n";
+        let r = render(text, &t, &BTreeMap::new());
+        assert_eq!(
+            r.text,
+            "element selected {\n    background-color: #2f334d;\n}\nwindow {\n    background-color: #1e2030;\n}\n"
+        );
+        let r2 = render(&r.text, &t, &r.written);
+        assert_eq!(r2.text, r.text, "second apply must be a no-op");
     }
 
     #[test]
